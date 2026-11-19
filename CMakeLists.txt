@@ -40,21 +40,42 @@ add_library(shogod_core STATIC ${SHOGOD_CORE_SOURCES})
 target_include_directories(shogod_core PUBLIC src vendor)
 target_compile_options(shogod_core PUBLIC ${SHOGOD_WARNINGS})
 target_compile_definitions(shogod_core PUBLIC SHOGOD_EXPORTS NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(shogod_core PUBLIC shell32 ole32)
+target_link_libraries(shogod_core PUBLIC shell32 ole32 windowscodecs)
+
+# ---- ui + render (DX11/ImGui surface, menu, pages) --------------------------
+set(SHOGOD_UI_SOURCES
+    src/engine/render/dx11.cpp
+    src/ui/style.cpp
+    src/ui/widgets.cpp
+    src/ui/menu.cpp
+    src/ui/pages/pages_common.cpp
+    src/ui/pages/page_rage.cpp
+    src/ui/pages/page_visuals.cpp
+    src/ui/pages/page_misc.cpp
+    src/ui/pages/page_configs.cpp
+    src/ui/pages/page_settings.cpp
+)
+
+add_library(shogod_ui STATIC ${SHOGOD_UI_SOURCES})
+target_link_libraries(shogod_ui PUBLIC shogod_core imgui d3d11 dxgi)
 
 # ---- shogod.dll -------------------------------------------------------------
 add_library(shogod SHARED
     src/engine/dllmain.cpp
 )
-target_link_libraries(shogod PRIVATE shogod_core imgui)
+target_link_libraries(shogod PRIVATE shogod_ui)
 set_target_properties(shogod PROPERTIES
     OUTPUT_NAME "shogod"
     PREFIX ""
     SUFFIX ".dll"
     MSVC_RUNTIME_LIBRARY "MultiThreaded"
 )
-# Product image: optimised, no debug heap, no /GS cookies on hot paths.
 target_compile_options(shogod PRIVATE $<$<CONFIG:Release>:/O2 /Oi /Gy>)
+
+# ---- menu host (visual gate, standalone) ------------------------------------
+add_executable(shogod_host tools/menu_host/main.cpp)
+target_link_libraries(shogod_host PRIVATE shogod_ui)
+set_target_properties(shogod_host PROPERTIES OUTPUT_NAME "shogod_host")
 
 # ---- tests ------------------------------------------------------------------
 option(SHOGOD_BUILD_TESTS "Build the unit-test harness" ON)
