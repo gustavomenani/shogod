@@ -4,6 +4,8 @@
 #include "engine/render/dx11.hpp"
 #include "engine/runtime.hpp"
 #include "sdk/signatures.hpp"
+#include "engine/module.hpp"
+#include <cmath>
 #include "ui/menu.hpp"
 #include "ui/style.hpp"
 
@@ -172,10 +174,58 @@ void set_menu_open(bool open) {
     }
 }
 
+void probe_view_matrix_once() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+
+    const auto client = module::find("client.dll");
+    if (!client.valid()) return;
+
+    constexpr std::uint32_t k_view_render_rva = 0x256afa0;
+    constexpr std::uint32_t k_view_render_vtable_rva = 0x1c76ac8;
+
+    __try {
+        auto* obj = reinterpret_cast<std::uint8_t*>(client.base + k_view_render_rva);
+        const auto vtable = *reinterpret_cast<std::uintptr_t*>(obj);
+        log::info("viewprobe: CViewRender {:p} vtable {:#x} (want {:#x})", static_cast<void*>(obj),
+                  vtable, client.base + k_view_render_vtable_rva);
+        if (vtable != client.base + k_view_render_vtable_rva) return;
+
+        const float* data = reinterpret_cast<const float*>(obj);
+        constexpr int k_words = 0x1d60 / 4;
+        int found = 0;
+        for (int i = 8; i + 16 <= k_words && found < 6; ++i) {
+            const float* m = data + i;
+            bool finite = true;
+            for (int k = 0; k < 16; ++k) {
+                if (!std::isfinite(m[k])) { finite = false; break; }
+            }
+            if (!finite) continue;
+            if (std::fabs(m[3]) > 1e-3f || std::fabs(m[7]) > 1e-3f || std::fabs(m[11]) > 1e-3f)
+                continue;
+            const float w_row = m[12] * m[12] + m[13] * m[13] + m[14] * m[14] + m[15] * m[15];
+            if (w_row < 1e-3f) continue;
+            if (std::fabs(m[14]) > 2.0f && std::fabs(m[15]) > 2.0f) continue;
+
+            log::warn("viewprobe: matrix candidate off {:#x}: [{:.4f} {:.4f} {:.4f} {:.4f} | "
+                      "{:.4f} {:.4f} {:.4f} {:.4f} | {:.4f} {:.4f} {:.4f} {:.4f} | "
+                      "{:.4f} {:.4f} {:.4f} {:.4f}]",
+                      static_cast<unsigned>(i * 4), m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+                      m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+            ++found;
+        }
+        log::info("viewprobe: {} candidates", found);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        log::error("viewprobe: faulted while reading CViewRender");
+    }
+}
+
 HRESULT WINAPI hk_present(IDXGISwapChain* swapchain, UINT sync, UINT flags) {
     static int present_calls = 0;
     static bool present_logged = false;
     ++present_calls;
+    if (present_calls == 30) probe_view_matrix_once();
     if (!present_logged && present_calls >= 3) {
         present_logged = true;
         log::info("hooks: Present hook live ({} calls)", present_calls);

@@ -372,3 +372,19 @@ A view matrix **ainda não está derivada**. Ela deve ser membro desse objeto
 escreve 16 floats nesse intervalo por frame e confirmar com leitura de
 `obj + off` durante o jogo (valores finitos, `w` coerente, muda com a câmera).
 Vtable tem 23 slots; o slot 17 é um getter de float em `+0x1cd0`.
+
+### 8.6 Sonda de runtime da view matrix (resultado negativo registrado)
+
+Sonda em jogo (`viewprobe`, presente em `src/engine/hooks.cpp`) leu o objeto
+`CViewRender` (`base+0x256afa0`, vtable confere) e varreu 16 floats alinhados
+em `[0x20, 0x1d60)` procurando forma de world-to-clip (coluna 3 das linhas
+0..2 ≈ 0, linha w não nula, finitos).
+
+Resultado: **6 candidatos, todos lixo** (offsets `0xdc..0x190`, valores
+-1/0/1 e um `-25738.4`). Nenhum bloco de matriz no objeto com essa forma.
+
+Conclusão: a matriz não está embutida como 4x4 plano nesse intervalo, ou está
+em convenção coluna-maior, ou o objeto guarda um ponteiro para `CViewSetup` /
+matriz em outro global. Próximo passo (curto): relaxar o filtro para as duas
+convenções e seguir ponteiros do objeto; alternativa é achar o writer por
+xref do slot 17 (`float em +0x1cd0`) e subir até o cálculo de projeção.
