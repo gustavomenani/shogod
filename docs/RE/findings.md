@@ -352,3 +352,23 @@ steam://run/730//-insecure -novid +game_type 0 +game_mode 1 +map de_dust2
 build/Release/shogod_loader.exe --wait 60
 %APPDATA%\shogod\logs\shogod-YYYYMMDD.log
 ```
+
+### 8.5 CViewRender — instância estática localizada (base para a view matrix)
+
+O objeto `CViewRender` é construído **in-place** num global BSS, não no heap:
+
+```
+0x181a8f270  lea rcx, [rip + 0xadbd29]   ; rcx = 0x18256afa0
+0x181a8f277  jmp 0x180bfa140              ; CViewRender::ctor
+```
+
+- Instância: RVA **`0x256afa0`** (BSS, sem bytes em disco).
+- Ctor: `0x180bfa140`, escreve vtable `0x181c76ac8` em `[rcx]`.
+- Tamanho do objeto: `0x1d60` (deleter em `0x180bfb3e9`).
+- Validação de runtime: `obj = base + 0x256afa0`; `*(uintptr_t*)obj == base + 0x1c76ac8`.
+
+A view matrix **ainda não está derivada**. Ela deve ser membro desse objeto
+(ou de um `CViewSetup` embutido nele); o próximo passo é achar a função que
+escreve 16 floats nesse intervalo por frame e confirmar com leitura de
+`obj + off` durante o jogo (valores finitos, `w` coerente, muda com a câmera).
+Vtable tem 23 slots; o slot 17 é um getter de float em `+0x1cd0`.
