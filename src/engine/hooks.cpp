@@ -4,6 +4,7 @@
 #include "engine/render/dx11.hpp"
 #include "engine/runtime.hpp"
 #include "sdk/signatures.hpp"
+#include "sdk/schema_probe.hpp"
 #include "engine/module.hpp"
 #include <cmath>
 #include "ui/menu.hpp"
@@ -226,6 +227,7 @@ HRESULT WINAPI hk_present(IDXGISwapChain* swapchain, UINT sync, UINT flags) {
     static bool present_logged = false;
     ++present_calls;
     if (present_calls == 30) probe_view_matrix_once();
+    if (present_calls == 40) sdk::probe_schema_once();
     if (!present_logged && present_calls >= 3) {
         present_logged = true;
         log::info("hooks: Present hook live ({} calls)", present_calls);
