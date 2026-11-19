@@ -83,7 +83,8 @@ void init() {
     std::filesystem::create_directories(root, ec);
 
     g_path = (root / ("shogod-" + today_stamp() + ".log")).string();
-    (void)fopen_s(&g_file, g_path.c_str(), "ab");
+    // _SH_DENYNO keeps the file readable while the game is running (live logs).
+    g_file = _fsopen(g_path.c_str(), "ab", _SH_DENYNO);
     g_initialised = true;
 
     if (g_file) {

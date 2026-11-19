@@ -52,6 +52,13 @@ bool g_window = false;
 void mark_cfg_valid(void* function) {
     if (function == nullptr) return;
 
+    PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY policy{};
+    if (!GetProcessMitigationPolicy(GetCurrentProcess(), ProcessControlFlowGuardPolicy, &policy,
+                                    sizeof policy) ||
+        policy.EnableControlFlowGuard == 0) {
+        return;  // CFG off: indirect calls are not checked, nothing to register
+    }
+
     SYSTEM_INFO info{};
     GetSystemInfo(&info);
     const std::uintptr_t page = reinterpret_cast<std::uintptr_t>(function) & ~(info.dwPageSize - 1);
@@ -105,7 +112,6 @@ void release_rtv() {
 }
 
 bool ensure_rtv(IDXGISwapChain* swapchain) {
-    log::info("hooks: dummy device");
     DXGI_SWAP_CHAIN_DESC desc{};
     if (FAILED(swapchain->GetDesc(&desc))) return false;
     if (g_rtv && desc.BufferDesc.Width == g_rtv_w && desc.BufferDesc.Height == g_rtv_h) return true;
@@ -138,7 +144,6 @@ bool init_surface(IDXGISwapChain* swapchain) {
     if (!device) return false;
     device->GetImmediateContext(&ctx);
 
-    log::info("hooks: dummy device");
     DXGI_SWAP_CHAIN_DESC desc{};
     swapchain->GetDesc(&desc);
     g_hwnd = desc.OutputWindow;
@@ -327,6 +332,13 @@ bool install_graphics() {
     // while DXGI/overlays own it kills the process before the hook runs.
     const bool ok = g_present != nullptr && g_resize != nullptr;
 
+    // The class vtable is static image data; the bootstrap objects can go.
+    swapchain->Release();
+    ctx->Release();
+    device->Release();
+    DestroyWindow(window);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+
     if (ok) log::info("hooks: Present/ResizeBuffers hooked");
     else log::error("hooks: swapchain patch failed");
     return ok;
@@ -401,16 +413,24 @@ void* find_game_swapchain(HWND hwnd) {
 
         const bool usable = mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE &&
                             mbi.RegionSize <= 0x4000000 &&
+                            (mbi.Protect & PAGE_GUARD) == 0 &&
                             (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
                                             PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
                                             PAGE_EXECUTE_WRITECOPY)) != 0;
         if (usable) {
-            const auto* begin = static_cast<const std::uintptr_t*>(mbi.BaseAddress);
-            const std::size_t count = mbi.RegionSize / sizeof(std::uintptr_t);
-            for (std::size_t i = 0; i < count; ++i) {
-                if (begin[i] != vtable_bits) continue;
-                auto* candidate = reinterpret_cast<void*>(const_cast<std::uintptr_t*>(begin + i));
-                if (probe_swapchain(candidate, hwnd)) return candidate;
+            // A guard page or a race with a freeing thread faults mid-scan;
+            // keep the walk inside SEH so one bad region cannot kill the game.
+            __try {
+                const auto* begin = static_cast<const std::uintptr_t*>(mbi.BaseAddress);
+                const std::size_t count = mbi.RegionSize / sizeof(std::uintptr_t);
+                for (std::size_t i = 0; i < count; ++i) {
+                    if (begin[i] != vtable_bits) continue;
+                    auto* candidate =
+                        reinterpret_cast<void*>(const_cast<std::uintptr_t*>(begin + i));
+                    if (probe_swapchain(candidate, hwnd)) return candidate;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                // region went away or is partially unmapped: skip it
             }
         }
         address = next;

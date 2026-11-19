@@ -38,9 +38,16 @@ std::string font_path() {
     if (const char* env = std::getenv("SHOGOD_FONT_DIR")) {
         return (std::filesystem::path(env) / "Inter-Medium.ttf").string();
     }
-    char exe[MAX_PATH]{};
-    GetModuleFileNameA(nullptr, exe, MAX_PATH);
-    return (std::filesystem::path(exe).parent_path() / "fonts" / "Inter-Medium.ttf").string();
+
+    // Our own module, not the host executable: the DLL ships with fonts/.
+    HMODULE self = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCSTR>(&font_path), &self);
+
+    char module[MAX_PATH]{};
+    GetModuleFileNameA(self, module, MAX_PATH);
+    return (std::filesystem::path(module).parent_path() / "fonts" / "Inter-Medium.ttf").string();
 }
 
 }  // namespace

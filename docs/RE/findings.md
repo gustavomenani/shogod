@@ -331,13 +331,19 @@ derivar: slots do TypeScope).
   `schemasystem.dll`.
 - `CreateMove` hook: instalado no `vtable[7]` do objeto; o jogo sobrevive.
   Ainda sem log de chamada porque o teste rodou em menu/partida sem tick.
-- **Bloqueio atual**: redirecionar `Present`/`ResizeBuffers` na vtable
-  compartilhada do `IDXGISwapChain` derruba o CS2 dentro de `dxgi.dll`
-  (access violation com endereço `Present+7`, sem o detour ser chamado;
-  CFG e signature policy desligados no processo). `WndProc` sozinho e o
-  hook de `CreateMove` sobrevivem. Caminho em teste: clone privado da
-  vtable + troca do ponteiro no objeto do jogo (nunca tocar a tabela
-  compartilhada). Alternativa: inline detour com trampolim.
+- **Present resolvido**: editar a vtable compartilhada do `IDXGISwapChain`
+  derruba o CS2 dentro de `dxgi.dll` (falha em `Present+7`, detour nunca
+  chamado; CFG e signature policy desligados — não é CFG). Solução que
+  funciona: **clone privado da vtable**. O hook cria um swapchain dummy,
+  captura a vtable, localiza o objeto do jogo por varredura de memória
+  (qword == vtable + `GetDesc` retornando a janela do jogo, sob SEH e
+  pulando `PAGE_GUARD`), copia a tabela para memória própria, troca os
+  slots 8/13 no clone e escreve o ponteiro da vtable só naquele objeto.
+  Nenhuma tabela compartilhada é tocada. Evidência: log
+  `hooks: private vtable ... installed` + `hooks: Present hook live`.
+- **CreateMove ao vivo**: `edx=0`, `count=2`, `arr` válido nos 3 primeiros
+  ticks — validação do §4.8 cumprida. Menu renderiza em 1920x1080 com o
+  jogo rodando (screenshot `shots/game/menu_ingame.png`).
 
 ### 8.4 Como reproduzir o teste in-game
 
