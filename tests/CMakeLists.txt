@@ -6,6 +6,7 @@ add_executable(shogod_tests
     test_math.cpp
     test_pattern.cpp
     test_config.cpp
+    test_features.cpp
 )
 target_link_libraries(shogod_tests PRIVATE shogod_core GTest::gtest_main)
 target_include_directories(shogod_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)

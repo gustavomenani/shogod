@@ -74,12 +74,22 @@ void context::restore_state() {
     saved_ = {};
 }
 
-bool context::begin() {
+bool context::begin(ID3D11RenderTargetView* target, UINT width, UINT height) {
     if (!ready_) return false;
+    capture_state();  // the game's state, before we bind anything of ours
+
+    if (target && width > 0 && height > 0) {
+        ctx_->OMSetRenderTargets(1, &target, nullptr);
+        D3D11_VIEWPORT vp{};
+        vp.Width = static_cast<float>(width);
+        vp.Height = static_cast<float>(height);
+        vp.MaxDepth = 1.0f;
+        ctx_->RSSetViewports(1, &vp);
+    }
+
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
-    capture_state();
     return true;
 }
 

@@ -1,6 +1,8 @@
 // shogod :: DLL entry — the loader's landing point.
 #include "brand.hpp"
+#include "engine/hooks.hpp"
 #include "engine/log.hpp"
+#include "engine/runtime.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -14,6 +16,10 @@ HMODULE g_module = nullptr;
 DWORD WINAPI bootstrap(LPVOID) {
     shogod::log::info("{} loaded — module base {:p}", shogod::brand::version_tag(),
                       static_cast<void*>(g_module));
+    shogod::runtime::init();
+    if (!shogod::hooks::install()) {
+        shogod::log::error("bootstrap: hook installation failed — menu will not appear");
+    }
     return 0;
 }
 
@@ -30,7 +36,12 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
             return TRUE;
         }
         case DLL_PROCESS_DETACH:
-            shogod::log::info("{} unloading", shogod::brand::version_tag());
+            if (g_module != nullptr) {
+                shogod::log::info("{} unloading", shogod::brand::version_tag());
+                shogod::hooks::uninstall();
+                shogod::runtime::shutdown();
+                g_module = nullptr;
+            }
             shogod::log::shutdown();
             return TRUE;
         default:

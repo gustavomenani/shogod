@@ -34,6 +34,10 @@ set(SHOGOD_CORE_SOURCES
     src/features/math/hull.cpp
     src/features/math/hitchance.cpp
     src/config/config.cpp
+    src/sdk/snapshot.cpp
+    src/features/backtrack.cpp
+    src/features/rage/target.cpp
+    src/features/aaa/antiaim.cpp
 )
 
 add_library(shogod_core STATIC ${SHOGOD_CORE_SOURCES})
@@ -62,6 +66,9 @@ target_link_libraries(shogod_ui PUBLIC shogod_core imgui d3d11 dxgi)
 # ---- shogod.dll -------------------------------------------------------------
 add_library(shogod SHARED
     src/engine/dllmain.cpp
+    src/engine/hooks.cpp
+    src/engine/module.cpp
+    src/engine/runtime.cpp
 )
 target_link_libraries(shogod PRIVATE shogod_ui)
 set_target_properties(shogod PROPERTIES
@@ -76,6 +83,10 @@ target_compile_options(shogod PRIVATE $<$<CONFIG:Release>:/O2 /Oi /Gy>)
 add_executable(shogod_host tools/menu_host/main.cpp)
 target_link_libraries(shogod_host PRIVATE shogod_ui)
 set_target_properties(shogod_host PROPERTIES OUTPUT_NAME "shogod_host")
+
+add_executable(shogod_loader tools/loader/main.cpp)
+set_target_properties(shogod_loader PROPERTIES OUTPUT_NAME "shogod_loader")
+target_compile_options(shogod_loader PRIVATE /W4 /utf-8 /MP)
 
 # ---- tests ------------------------------------------------------------------
 option(SHOGOD_BUILD_TESTS "Build the unit-test harness" ON)

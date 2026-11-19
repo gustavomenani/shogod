@@ -175,7 +175,9 @@ int wmain(int argc, wchar_t** argv) {
         ctx->ClearRenderTargetView(rtv, clear);
         ctx->OMSetRenderTargets(1, &rtv, nullptr);
 
-        if (renderer.begin()) {
+        RECT client{};
+        GetClientRect(g_hwnd, &client);
+        if (renderer.begin(rtv, static_cast<UINT>(client.right), static_cast<UINT>(client.bottom))) {
             shogod::ui::draw_menu(cfg, menu, live);
             renderer.end();
         }

@@ -22,7 +22,7 @@ public:
     void shutdown();
 
     // Returns false until init() succeeded; the caller then skips the frame.
-    bool begin();
+    bool begin(ID3D11RenderTargetView* target = nullptr, UINT width = 0, UINT height = 0);
     void end();
 
     [[nodiscard]] bool ready() const noexcept { return ready_; }
