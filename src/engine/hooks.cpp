@@ -3,10 +3,12 @@
 #include "engine/log.hpp"
 #include "engine/render/dx11.hpp"
 #include "engine/runtime.hpp"
+#include "sdk/signatures.hpp"
 #include "ui/menu.hpp"
 #include "ui/style.hpp"
 
 #include <atomic>
+#include <cstring>
 #include <mutex>
 
 #ifndef NOMINMAX
@@ -42,6 +44,43 @@ HWND g_hwnd = nullptr;
 bool g_graphics = false;
 bool g_window = false;
 
+// DXGI dispatch goes through CFG. A detour address that is not in the CFG
+// bitmap fails the guard check and the process dies inside dxgi with an
+// invalid-target fault; register our pages before the first call lands.
+void mark_cfg_valid(void* function) {
+    if (function == nullptr) return;
+
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    const std::uintptr_t page = reinterpret_cast<std::uintptr_t>(function) & ~(info.dwPageSize - 1);
+    CFG_CALL_TARGET_INFO entry{};
+    entry.Offset = reinterpret_cast<std::uintptr_t>(function) - page;
+    entry.Flags = CFG_CALL_TARGET_VALID;
+
+    using set_targets_fn = BOOL(WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, PCFG_CALL_TARGET_INFO);
+    static set_targets_fn set_targets = [] {
+        for (const wchar_t* module : {L"kernelbase.dll", L"kernel32.dll"}) {
+            const HMODULE handle = GetModuleHandleW(module);
+            if (handle != nullptr) {
+                auto fn = reinterpret_cast<set_targets_fn>(
+                    GetProcAddress(handle, "SetProcessValidCallTargets"));
+                if (fn != nullptr) return fn;
+            }
+        }
+        return static_cast<set_targets_fn>(nullptr);
+    }();
+
+    if (set_targets == nullptr) {
+        log::warn("hooks: SetProcessValidCallTargets unavailable");
+        return;
+    }
+
+    if (!set_targets(GetCurrentProcess(), reinterpret_cast<void*>(page), info.dwPageSize, 1,
+                     &entry)) {
+        log::warn("hooks: CFG target registration failed ({}), continuing", GetLastError());
+    }
+}
+
 bool patch_pointer(void** slot, void* replacement, void** original) {
     DWORD old = 0;
     if (!VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) return false;
@@ -64,6 +103,7 @@ void release_rtv() {
 }
 
 bool ensure_rtv(IDXGISwapChain* swapchain) {
+    log::info("hooks: dummy device");
     DXGI_SWAP_CHAIN_DESC desc{};
     if (FAILED(swapchain->GetDesc(&desc))) return false;
     if (g_rtv && desc.BufferDesc.Width == g_rtv_w && desc.BufferDesc.Height == g_rtv_h) return true;
@@ -96,15 +136,17 @@ bool init_surface(IDXGISwapChain* swapchain) {
     if (!device) return false;
     device->GetImmediateContext(&ctx);
 
+    log::info("hooks: dummy device");
     DXGI_SWAP_CHAIN_DESC desc{};
     swapchain->GetDesc(&desc);
     g_hwnd = desc.OutputWindow;
 
-    ui::load_fonts(1.0f);
-    const auto& c = runtime::cfg().get().ui;
-    ui::apply_style(c.accent, c.dark_theme);
-
     const bool ok = g_render.init(device, ctx, g_hwnd);
+    if (ok) {
+        ui::load_fonts(1.0f);
+        const auto& c = runtime::cfg().get().ui;
+        ui::apply_style(c.accent, c.dark_theme);
+    }
     ctx->Release();
     device->Release();
     if (ok) log::info("hooks: DX11 surface initialised on {:p}", static_cast<void*>(g_hwnd));
@@ -124,6 +166,13 @@ void set_menu_open(bool open) {
 }
 
 HRESULT WINAPI hk_present(IDXGISwapChain* swapchain, UINT sync, UINT flags) {
+    static int present_calls = 0;
+    static bool present_logged = false;
+    ++present_calls;
+    if (!present_logged && present_calls >= 3) {
+        present_logged = true;
+        log::info("hooks: Present hook live ({} calls)", present_calls);
+    }
     if (!g_render.ready() && !init_surface(swapchain)) {
         return g_present(swapchain, sync, flags);
     }
@@ -211,6 +260,21 @@ BOOL CALLBACK find_window(HWND hwnd, LPARAM param) {
 }
 
 bool install_graphics() {
+    {
+        PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY cfg_policy{};
+        if (GetProcessMitigationPolicy(GetCurrentProcess(), ProcessControlFlowGuardPolicy,
+                                       &cfg_policy, sizeof cfg_policy)) {
+            log::info("hooks: CFG enable={} strict={}",
+                      static_cast<bool>(cfg_policy.EnableControlFlowGuard), static_cast<bool>(cfg_policy.StrictMode));
+        }
+        PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY sig_policy{};
+        if (GetProcessMitigationPolicy(GetCurrentProcess(), ProcessSignaturePolicy, &sig_policy,
+                                       sizeof sig_policy)) {
+            log::info("hooks: signature policy ms-signed-only={}",
+                      static_cast<bool>(sig_policy.MicrosoftSignedOnly));
+        }
+    }
+    log::info("hooks: bootstrap window");
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof wc;
     wc.lpfnWndProc = DefWindowProcW;
@@ -222,6 +286,7 @@ bool install_graphics() {
                                   nullptr, nullptr, wc.hInstance, nullptr);
     if (!window) return false;
 
+    log::info("hooks: dummy device");
     DXGI_SWAP_CHAIN_DESC desc{};
     desc.BufferCount = 1;
     desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -240,28 +305,150 @@ bool install_graphics() {
     const HRESULT hr = D3D11CreateDeviceAndSwapChain(
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 2, D3D11_SDK_VERSION, &desc,
         &swapchain, &device, &level, &ctx);
+    log::info("hooks: dummy device hr={:#x}", static_cast<unsigned>(hr));
     if (FAILED(hr)) {
         DestroyWindow(window);
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return false;
     }
 
-    g_present_slot = reinterpret_cast<void**>(vtable_entry(swapchain, 8));
-    g_resize_slot = reinterpret_cast<void**>(vtable_entry(swapchain, 13));
-    const bool ok = patch_pointer(g_present_slot, reinterpret_cast<void*>(&hk_present),
-                                  reinterpret_cast<void**>(&g_present)) &&
-                    patch_pointer(g_resize_slot, reinterpret_cast<void*>(&hk_resize),
-                                  reinterpret_cast<void**>(&g_resize));
+    const auto vtable = *reinterpret_cast<void***>(swapchain);
+    g_swapchain_vtable = vtable;
+    g_present = reinterpret_cast<present_t>(vtable[8]);
+    g_resize = reinterpret_cast<resize_t>(vtable[13]);
+    log::info("hooks: swapchain vtable {:p} (Present {:p}, Resize {:p})",
+              static_cast<void*>(vtable), reinterpret_cast<void*>(g_present),
+              reinterpret_cast<void*>(g_resize));
 
-    swapchain->Release();
-    ctx->Release();
-    device->Release();
-    DestroyWindow(window);
-    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    // Shared tables are not touched here: the game's own swapchain gets a
+    // private vtable copy in install_swapchain(). Patching the class table
+    // while DXGI/overlays own it kills the process before the hook runs.
+    const bool ok = g_present != nullptr && g_resize != nullptr;
 
     if (ok) log::info("hooks: Present/ResizeBuffers hooked");
     else log::error("hooks: swapchain patch failed");
     return ok;
+}
+
+using create_move_t = void* (*)(void*, int, int, int);
+create_move_t g_create_move = nullptr;
+void** g_create_move_slot = nullptr;
+int g_create_move_calls = 0;
+
+void* hk_create_move(void* self, int a, int b, int c) {
+    if (g_create_move_calls < 3) {
+        ++g_create_move_calls;
+        const int count = *reinterpret_cast<int*>(static_cast<char*>(self) + 0xb50);
+        void* arr = *reinterpret_cast<void**>(static_cast<char*>(self) + 0xb58);
+        log::info("create_move: edx={} r8={} r9={} count={} arr={:p}", a, b, c, count, arr);
+    }
+    return g_create_move(self, a, b, c);
+}
+
+bool install_create_move() {
+    const auto& anchors = sdk::resolve();
+    if (!anchors.input_ok) {
+        log::warn("hooks: CreateMove skipped — input anchor failed");
+        return false;
+    }
+
+    // The methods live in the vtable, not in the object body.
+    auto vtable = *reinterpret_cast<void***>(anchors.input);
+    g_create_move_slot = &vtable[7];
+    g_create_move = reinterpret_cast<create_move_t>(*g_create_move_slot);
+    const bool ok = patch_pointer(g_create_move_slot, reinterpret_cast<void*>(&hk_create_move),
+                                  reinterpret_cast<void**>(&g_create_move));
+    if (ok) log::info("hooks: CreateMove vtable[7] hooked (was {:p})", reinterpret_cast<void*>(g_create_move));
+    return ok;
+}
+
+void** g_swapchain_vtable = nullptr;
+void** g_private_vtable = nullptr;
+
+struct desc_probe {
+    HWND hwnd;
+    void* object;
+};
+
+bool probe_swapchain(void* object, HWND hwnd) {
+    __try {
+        const auto vtable = *reinterpret_cast<void***>(object);
+        if (vtable != g_swapchain_vtable) return false;
+
+        using get_desc_fn = HRESULT(STDMETHODCALLTYPE*)(void*, DXGI_SWAP_CHAIN_DESC*);
+        auto get_desc = reinterpret_cast<get_desc_fn>(vtable[12]);
+        if (get_desc == nullptr) return false;
+
+        DXGI_SWAP_CHAIN_DESC desc{};
+        if (FAILED(get_desc(object, &desc))) return false;
+        return desc.OutputWindow == hwnd && desc.BufferCount > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void* find_game_swapchain(HWND hwnd) {
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+
+    auto* address = static_cast<std::uint8_t*>(info.lpMinimumApplicationAddress);
+    auto* maximum = static_cast<std::uint8_t*>(info.lpMaximumApplicationAddress);
+    const std::uintptr_t vtable_bits = reinterpret_cast<std::uintptr_t>(g_swapchain_vtable);
+
+    while (address < maximum) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(address, &mbi, sizeof mbi) != sizeof mbi) break;
+        auto* next = static_cast<std::uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
+
+        const bool usable = mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE &&
+                            mbi.RegionSize <= 0x4000000 &&
+                            (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                            PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                            PAGE_EXECUTE_WRITECOPY)) != 0;
+        if (usable) {
+            const auto* begin = static_cast<const std::uintptr_t*>(mbi.BaseAddress);
+            const std::size_t count = mbi.RegionSize / sizeof(std::uintptr_t);
+            for (std::size_t i = 0; i < count; ++i) {
+                if (begin[i] != vtable_bits) continue;
+                auto* candidate = reinterpret_cast<void*>(begin + i);
+                if (probe_swapchain(candidate, hwnd)) return candidate;
+            }
+        }
+        address = next;
+    }
+    return nullptr;
+}
+
+bool install_swapchain(HWND hwnd) {
+    if (g_swapchain_vtable == nullptr) return false;
+
+    void* object = nullptr;
+    for (int attempt = 0; attempt < 40 && object == nullptr; ++attempt) {
+        object = find_game_swapchain(hwnd);
+        if (object == nullptr) Sleep(50);
+    }
+    if (object == nullptr) {
+        log::warn("hooks: game swapchain object not found");
+        return false;
+    }
+
+    constexpr std::size_t k_vtable_slots = 64;
+    auto** copy = static_cast<void**>(
+        VirtualAlloc(nullptr, k_vtable_slots * sizeof(void*), MEM_COMMIT | MEM_RESERVE,
+                     PAGE_READWRITE));
+    if (copy == nullptr) return false;
+    std::memcpy(copy, g_swapchain_vtable, k_vtable_slots * sizeof(void*));
+    copy[8] = reinterpret_cast<void*>(&hk_present);
+    copy[13] = reinterpret_cast<void*>(&hk_resize);
+
+    DWORD old = 0;
+    VirtualProtect(copy, k_vtable_slots * sizeof(void*), PAGE_READONLY, &old);
+    g_private_vtable = copy;
+    *reinterpret_cast<void***>(object) = copy;
+
+    log::info("hooks: private vtable {:p} installed on swapchain {:p}", static_cast<void*>(copy),
+              object);
+    return true;
 }
 
 bool install_window() {
@@ -291,6 +478,8 @@ bool install() {
     g_graphics = install_graphics();
     if (!g_graphics) return false;
     g_window = install_window();
+    if (g_window) install_swapchain(g_hwnd);
+    install_create_move();
     return g_graphics;
 }
 
@@ -302,10 +491,12 @@ void uninstall() {
     }
 
     if (g_graphics) {
-        if (g_present_slot && g_present) *g_present_slot = reinterpret_cast<void*>(g_present);
-        if (g_resize_slot && g_resize) *g_resize_slot = reinterpret_cast<void*>(g_resize);
-        g_present_slot = nullptr;
-        g_resize_slot = nullptr;
+        if (g_private_vtable != nullptr) {
+            // The owning object still points at our copy until the process
+            // exits; restoring the class table is all that is needed here.
+            VirtualFree(g_private_vtable, 0, MEM_RELEASE);
+            g_private_vtable = nullptr;
+        }
         g_present = nullptr;
         g_resize = nullptr;
         g_graphics = false;

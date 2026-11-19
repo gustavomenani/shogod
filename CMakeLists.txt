@@ -66,6 +66,7 @@ target_link_libraries(shogod_ui PUBLIC shogod_core imgui d3d11 dxgi)
 # ---- shogod.dll -------------------------------------------------------------
 add_library(shogod SHARED
     src/engine/dllmain.cpp
+    src/sdk/signatures.cpp
     src/engine/hooks.cpp
     src/engine/module.cpp
     src/engine/runtime.cpp

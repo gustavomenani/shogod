@@ -111,6 +111,9 @@ int wmain(int argc, wchar_t** argv) {
     shogod::render::context renderer;
     if (!renderer.init(device, ctx, g_hwnd)) return 1;
 
+    shogod::ui::load_fonts(1.0f);
+    shogod::ui::apply_style(shogod::config::rgba{}, true);
+
     shogod::config::store cfg;
     cfg.load(shogod::config::store::default_dir() / "default.json");
 

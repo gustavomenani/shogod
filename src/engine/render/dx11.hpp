@@ -26,6 +26,8 @@ public:
     void end();
 
     [[nodiscard]] bool ready() const noexcept { return ready_; }
+    [[nodiscard]] ID3D11Device* device() const noexcept { return device_; }
+    [[nodiscard]] ID3D11DeviceContext* device_context() const noexcept { return ctx_; }
 
     // Device loss: drop backend objects; the caller recreates the device and
     // calls invalidate() then a fresh init() path on the new device.

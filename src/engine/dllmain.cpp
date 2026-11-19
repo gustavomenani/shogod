@@ -3,6 +3,7 @@
 #include "engine/hooks.hpp"
 #include "engine/log.hpp"
 #include "engine/runtime.hpp"
+#include "sdk/signatures.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -20,6 +21,10 @@ DWORD WINAPI bootstrap(LPVOID) {
     if (!shogod::hooks::install()) {
         shogod::log::error("bootstrap: hook installation failed — menu will not appear");
     }
+
+    if (false) { const auto& anchors = shogod::sdk::resolve();
+    shogod::runtime::set_anchor_summary(anchors.ok_count(), shogod::sdk::anchors::total_count,
+                                        anchors.summary); }
     return 0;
 }
 
