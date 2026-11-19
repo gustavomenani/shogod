@@ -32,6 +32,8 @@ using wndproc_t = LRESULT(CALLBACK*)(HWND, UINT, WPARAM, LPARAM);
 
 present_t g_present = nullptr;
 resize_t g_resize = nullptr;
+void** g_swapchain_vtable = nullptr;
+void** g_private_vtable = nullptr;
 wndproc_t g_wndproc = nullptr;
 void** g_present_slot = nullptr;
 void** g_resize_slot = nullptr;
@@ -362,9 +364,6 @@ bool install_create_move() {
     return ok;
 }
 
-void** g_swapchain_vtable = nullptr;
-void** g_private_vtable = nullptr;
-
 struct desc_probe {
     HWND hwnd;
     void* object;
@@ -410,7 +409,7 @@ void* find_game_swapchain(HWND hwnd) {
             const std::size_t count = mbi.RegionSize / sizeof(std::uintptr_t);
             for (std::size_t i = 0; i < count; ++i) {
                 if (begin[i] != vtable_bits) continue;
-                auto* candidate = reinterpret_cast<void*>(begin + i);
+                auto* candidate = reinterpret_cast<void*>(const_cast<std::uintptr_t*>(begin + i));
                 if (probe_swapchain(candidate, hwnd)) return candidate;
             }
         }
