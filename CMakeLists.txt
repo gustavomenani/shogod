@@ -33,10 +33,11 @@ set(SHOGOD_CORE_SOURCES
     src/features/math/angles.cpp
     src/features/math/hull.cpp
     src/features/math/hitchance.cpp
+    src/config/config.cpp
 )
 
 add_library(shogod_core STATIC ${SHOGOD_CORE_SOURCES})
-target_include_directories(shogod_core PUBLIC src)
+target_include_directories(shogod_core PUBLIC src vendor)
 target_compile_options(shogod_core PUBLIC ${SHOGOD_WARNINGS})
 target_compile_definitions(shogod_core PUBLIC SHOGOD_EXPORTS NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(shogod_core PUBLIC shell32 ole32)
