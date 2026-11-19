@@ -1,0 +1,4 @@
+imgui 77fe4588e6af934b4167b91312174ca3fbb0d71a https://github.com/ocornut/imgui
+minhook  https://github.com/nefarius/MinHook
+nlohmann-json v3.11.3 sha256 9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6
+gtest a46a6012a133c7c0929fdae55b321c2fe65f3c5f
