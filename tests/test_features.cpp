@@ -2315,54 +2315,57 @@ TEST(createmove, bhop_subframe_prediction_and_clean_move_button_transitions) {
     EXPECT_EQ(cmd.button_state.scroll, sdk::k_in_attack);
 }
 
-TEST(createmove, runtime_air_strafe_eliminates_45deg_snaps_and_64hz_button_chatter) {
-    features::createmove_state st{};
-    config::anti_aim_cfg aa{};
-    aa.enabled = true;
-    aa.base_yaw = config::yaw_mode::fake_static;
-    aa.auto_adjust = true;
-    aa.at_targets = true;
-
-    // 1. Straight-line jump (W held, diagonal initial velocity 37 deg):
-    //    must hold each strafe lobe for >= k_min_strafe_lobe_ticks, exceed 300 u/s,
-    //    and never snap steer_yaw by 45 deg between consecutive ticks.
-    math::vec3 vel{200.0f, 150.0f, 0.0f};  // 250 u/s at +36.87 deg
-    float prev_yaw = 0.0f;
-    int sign_flips = 0;
-    int prev_sign = 0;
-    for (int t = 0; t < 32; ++t) {
-        const auto out = features::compute_runtime_air_strafe(
-            st, 500 + t, 0.0f, true, aa, vel, 1.0f, 0.0f);
-        ASSERT_TRUE(out.active);
-        EXPECT_FLOAT_EQ(out.forwardmove, 0.0f);
-        EXPECT_FLOAT_EQ(std::fabs(out.leftmove), 1.0f);
-        if (t > 0) {
-            EXPECT_LT(std::fabs(math::yaw_delta(prev_yaw, out.steer_yaw)), 12.0f);
-            if (out.next_strafe_sign != prev_sign) ++sign_flips;
+TEST(createmove, runtime_air_strafe_eliminates_45deg_snaps_and_preserves_air_aa_adjust) {
+    // 1. 360-deg ref_yaw sweep (covering both +36 deg rifle auto_adjust, +18 deg pistol auto_adjust,
+    //    and arbitrary at_targets / freestanding AA angles): zero 45-deg sector boundary oscillations,
+    //    all quantized moves in {-1, 0, +1}, and speed exceeds 300 u/s in 32 ticks.
+    for (int ref_deg = -180; ref_deg < 180; ref_deg += 9) {
+        features::createmove_state st{};
+        math::vec3 vel{250.0f, 0.0f, 0.0f};
+        const float ref_yaw = static_cast<float>(ref_deg);
+        float prev_yaw = 0.0f;
+        for (int t = 0; t < 32; ++t) {
+            const auto out = features::compute_runtime_air_strafe(
+                st, 500 + t, 0.0f, ref_yaw, vel, 1.0f, 0.0f);
+            ASSERT_TRUE(out.active);
+            EXPECT_FLOAT_EQ(out.forwardmove, std::round(out.forwardmove));
+            EXPECT_FLOAT_EQ(out.leftmove, std::round(out.leftmove));
+            EXPECT_LE(std::fabs(math::yaw_delta(ref_yaw, out.steer_yaw)), 27.51f);
+            // Sub-frame idempotency for the same command_number.
+            const auto dup = features::compute_runtime_air_strafe(
+                st, 500 + t, 0.0f, ref_yaw, vel, 1.0f, 0.0f);
+            EXPECT_FLOAT_EQ(dup.steer_yaw, out.steer_yaw);
+            EXPECT_FLOAT_EQ(dup.forwardmove, out.forwardmove);
+            EXPECT_FLOAT_EQ(dup.leftmove, out.leftmove);
+            if (t > 0) {
+                EXPECT_LT(std::fabs(math::yaw_delta(prev_yaw, out.steer_yaw)), 10.0f);
+            }
+            prev_yaw = out.steer_yaw;
+            vel = step_air_physics_tick(vel, out.steer_yaw, out.forwardmove, out.leftmove);
         }
-        prev_yaw = out.steer_yaw;
-        prev_sign = out.next_strafe_sign;
-        vel = step_air_physics_tick(vel, out.steer_yaw, out.forwardmove, out.leftmove);
+        EXPECT_GT(std::hypot(vel.x, vel.y), 300.0f);
     }
-    EXPECT_GT(std::hypot(vel.x, vel.y), 300.0f);
-    EXPECT_LE(sign_flips, 32 / features::k_min_strafe_lobe_ticks + 1);
 
-    // 2. Smooth right mouse turn (-1.5 deg/tick): sign locks to -1 with zero button flips.
-    features::reset_strafe_state(st);
-    vel = {250.0f, 0.0f, 0.0f};
+    // 2. Smooth right mouse turn (-1.5 deg/tick, Space-only wish 0/0) with Backward AA + 36 deg auto_adjust:
+    //    velocity tracks the camera turn within 5 deg, accelerates >= 288 u/s, and keeps AA auto_adjust centered.
+    features::createmove_state st{};
+    math::vec3 vel{250.0f, 0.0f, 0.0f};
     float cam_yaw = 0.0f;
+    float prev_yaw = 0.0f;
     for (int t = 0; t < 24; ++t) {
         cam_yaw = math::normalize_yaw(cam_yaw - 1.5f);
+        const float aa_yaw = math::normalize_yaw(cam_yaw + 180.0f + 36.0f);
         const auto out = features::compute_runtime_air_strafe(
-            st, 600 + t, cam_yaw, true, aa, vel, 1.0f, 0.0f);
+            st, 600 + t, cam_yaw, aa_yaw, vel, 0.0f, 0.0f);
         ASSERT_TRUE(out.active);
+        EXPECT_LE(std::fabs(math::yaw_delta(aa_yaw, out.steer_yaw)), 27.51f);
         if (t >= 1) {
-            EXPECT_EQ(out.next_strafe_sign, -1);
-            EXPECT_FLOAT_EQ(out.leftmove, 1.0f);
             EXPECT_LT(std::fabs(math::yaw_delta(prev_yaw, out.steer_yaw)), 12.0f);
         }
         prev_yaw = out.steer_yaw;
         vel = step_air_physics_tick(vel, out.steer_yaw, out.forwardmove, out.leftmove);
     }
-    EXPECT_GE(std::hypot(vel.x, vel.y), 290.0f);
+    const float final_vel_yaw = std::atan2(vel.y, vel.x) * (180.0f / 3.14159265f);
+    EXPECT_LT(std::fabs(math::yaw_delta(cam_yaw, final_vel_yaw)), 6.0f);
+    EXPECT_GE(std::hypot(vel.x, vel.y), 288.0f);
 }

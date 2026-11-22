@@ -86,9 +86,12 @@ struct createmove_state {
     int strafe_sign = 1;
     int last_strafe_cmd = -1;
     int strafe_pending_sign = 1;
-    int strafe_hold_ticks = 0;
-    float last_strafe_camera_yaw = 0.0f;
-    bool has_strafe_camera_yaw = false;
+    int strafe_base_sector = 0;
+    bool has_strafe_base_sector = false;
+    float last_strafe_tilt = 0.0f;
+    bool has_last_strafe_output = false;
+    autostrafe_output last_strafe_output{};
+    bool bhop_space_latched = false;
     tick_input_latch tick_latch{};
     int auto_pistol_wait = 0;
     int last_auto_pistol_cmd = -1;
@@ -487,8 +490,6 @@ inline void step_peek_assist_stall(peek_assist_state& pa, int command_number,
     }
 }
 
-inline constexpr int k_min_strafe_lobe_ticks = 4;
-
 inline int latch_strafe_sign(createmove_state& state, int command_number) noexcept {
     if (state.last_strafe_cmd != command_number) {
         state.strafe_sign = (state.strafe_pending_sign >= 0) ? 1 : -1;
@@ -501,125 +502,115 @@ inline void reset_strafe_state(createmove_state& state) noexcept {
     state.strafe_sign = 1;
     state.strafe_pending_sign = 1;
     state.last_strafe_cmd = -1;
-    state.strafe_hold_ticks = 0;
-    state.last_strafe_camera_yaw = 0.0f;
-    state.has_strafe_camera_yaw = false;
+    state.strafe_base_sector = 0;
+    state.has_strafe_base_sector = false;
+    state.last_strafe_tilt = 0.0f;
+    state.has_last_strafe_output = false;
+    state.last_strafe_output = {};
 }
 
-inline int step_runtime_strafe_sign(createmove_state& state, int command_number,
-                                    float camera_yaw, const math::vec3& velocity,
-                                    float forward_wish, float left_wish) noexcept {
-    if (state.last_strafe_cmd == command_number) {
-        return state.strafe_sign;
-    }
-    state.last_strafe_cmd = command_number;
-
-    float cam_delta = 0.0f;
-    if (state.has_strafe_camera_yaw && std::isfinite(camera_yaw) &&
-        std::isfinite(state.last_strafe_camera_yaw)) {
-        cam_delta = math::yaw_delta(state.last_strafe_camera_yaw, camera_yaw);
-    }
-    if (std::isfinite(camera_yaw)) {
-        state.last_strafe_camera_yaw = math::normalize_yaw(camera_yaw);
-        state.has_strafe_camera_yaw = true;
-    }
-
-    const float speed_2d = velocity.finite() ? std::hypot(velocity.x, velocity.y) : 0.0f;
-    const bool has_wish = std::isfinite(forward_wish) && std::isfinite(left_wish) &&
-                          (std::fabs(forward_wish) > 0.05f || std::fabs(left_wish) > 0.05f);
-    const float offset_deg =
-        has_wish ? std::atan2(left_wish, forward_wish) * 57.29578f : 0.0f;
-    const float wish_yaw =
-        std::isfinite(camera_yaw) ? math::normalize_yaw(camera_yaw + offset_deg) : 0.0f;
-    const float vel_yaw =
-        speed_2d > 1e-3f ? std::atan2(velocity.y, velocity.x) * 57.29578f : wish_yaw;
-    const float delta = math::yaw_delta(vel_yaw, wish_yaw);
-
-    // 1. Active mouse turning takes immediate directional priority (natural air-strafe).
-    if (std::isfinite(cam_delta) && std::fabs(cam_delta) >= 0.25f) {
-        state.strafe_sign = (cam_delta > 0.0f) ? 1 : -1;
-        state.strafe_pending_sign = state.strafe_sign;
-        state.strafe_hold_ticks = 1;
-        return state.strafe_sign;
-    }
-
-    // 2. Explicit A/D/S directional turn when velocity differs from wish heading.
-    const bool explicit_dir_key =
-        std::isfinite(left_wish) && std::isfinite(forward_wish) &&
-        (std::fabs(left_wish) > 0.05f || forward_wish < -0.05f);
-    if (explicit_dir_key && std::fabs(delta) >= 12.0f) {
-        state.strafe_sign = (delta > 0.0f) ? 1 : -1;
-        state.strafe_pending_sign = state.strafe_sign;
-        state.strafe_hold_ticks = 1;
-        return state.strafe_sign;
-    }
-
-    // 3. Straight-line / settled heading: hold each lobe for at least k_min_strafe_lobe_ticks
-    //    to prevent 64 Hz left/right button & AnimGraph2 oscillation.
-    int desired = (state.strafe_sign >= 0) ? 1 : -1;
-    if (std::fabs(delta) >= 18.0f) {
-        desired = (delta > 0.0f) ? 1 : -1;
-    } else if (delta * static_cast<float>(desired) < -2.0f) {
-        desired = -desired;
-    }
-
-    if (desired != state.strafe_sign) {
-        if (state.strafe_hold_ticks >= k_min_strafe_lobe_ticks || std::fabs(delta) >= 35.0f) {
-            state.strafe_sign = desired;
-            state.strafe_hold_ticks = 1;
-        } else {
-            ++state.strafe_hold_ticks;
-        }
-    } else {
-        ++state.strafe_hold_ticks;
-    }
-    state.strafe_pending_sign = state.strafe_sign;
-    return state.strafe_sign;
+[[nodiscard]] inline int wrap_strafe_sector(int idx) noexcept {
+    while (idx > 4) idx -= 8;
+    while (idx < -4) idx += 8;
+    return idx;
 }
 
 [[nodiscard]] inline autostrafe_output compute_runtime_air_strafe(
     createmove_state& state, int command_number, float camera_yaw,
-    bool aa_active, const config::anti_aim_cfg& aa_cfg,
-    const math::vec3& velocity, float forward_wish, float left_wish) noexcept {
-    const int sign = step_runtime_strafe_sign(
-        state, command_number, camera_yaw, velocity, forward_wish, left_wish);
-    const float speed_2d = velocity.finite() ? std::hypot(velocity.x, velocity.y) : 0.0f;
-
-    float ref_yaw = std::isfinite(camera_yaw) ? math::normalize_yaw(camera_yaw) : 0.0f;
-    float eff_f_wish = forward_wish;
-    float eff_l_wish = left_wish;
-
-    if (speed_2d > 24.4f && std::isfinite(camera_yaw)) {
-        const float vel_yaw = std::atan2(velocity.y, velocity.x) * 57.29578f;
-        const float raw_offset = std::isfinite(aa_cfg.yaw_offset) ? aa_cfg.yaw_offset : 0.0f;
-        const float snapped_offset = std::round(raw_offset / 45.0f) * 45.0f;
-        if (aa_active) {
-            const float base_shift =
-                (aa_cfg.base_yaw == config::yaw_mode::off) ? 0.0f : 180.0f;
-            ref_yaw = math::normalize_yaw(vel_yaw + base_shift + snapped_offset);
-        } else {
-            ref_yaw = math::normalize_yaw(vel_yaw);
-        }
-
-        // Feed a synthetic wish on the chosen sign side of vel_yaw so compute_autostrafe
-        // honors the lobe-latched sign while keeping rel at exact +-90 deg (tilt == 0, zero 45-deg snaps).
-        const float target_wish_yaw =
-            math::normalize_yaw(vel_yaw + static_cast<float>(sign) * 30.0f);
-        const float rel_rad =
-            math::yaw_delta(camera_yaw, target_wish_yaw) * (3.14159265f / 180.0f);
-        eff_f_wish = std::cos(rel_rad);
-        eff_l_wish = std::sin(rel_rad);
-    } else if (aa_active && std::isfinite(camera_yaw)) {
-        const float raw_offset = std::isfinite(aa_cfg.yaw_offset) ? aa_cfg.yaw_offset : 0.0f;
-        const float snapped_offset = std::round(raw_offset / 45.0f) * 45.0f;
-        const float base_shift =
-            (aa_cfg.base_yaw == config::yaw_mode::off) ? 0.0f : 180.0f;
-        ref_yaw = math::normalize_yaw(camera_yaw + base_shift + snapped_offset);
+    float ref_yaw, const math::vec3& velocity,
+    float forward_wish, float left_wish) noexcept {
+    if (state.last_strafe_cmd == command_number && state.has_last_strafe_output) {
+        return state.last_strafe_output;
     }
 
-    autostrafe_output out = compute_sector_matched_autostrafe(
-        camera_yaw, ref_yaw, velocity, eff_f_wish, eff_l_wish, sign, command_number);
-    out.next_strafe_sign = sign;
+    autostrafe_output out{};
+    const float norm_ref = std::isfinite(ref_yaw) ? math::normalize_yaw(ref_yaw) : 0.0f;
+    out.steer_yaw = norm_ref;
+    out.next_strafe_sign = (state.strafe_pending_sign >= 0) ? 1 : -1;
+    if (!std::isfinite(camera_yaw) || !std::isfinite(ref_yaw) || !velocity.finite() ||
+        !std::isfinite(forward_wish) || !std::isfinite(left_wish)) {
+        return out;
+    }
+
+    const int sign_in = latch_strafe_sign(state, command_number);
+    const autostrafe_output base =
+        compute_autostrafe({camera_yaw, velocity, forward_wish, left_wish, sign_in});
+    out.next_strafe_sign = base.next_strafe_sign;
+    state.strafe_pending_sign = base.next_strafe_sign;
+    if (!base.active) {
+        state.last_strafe_output = out;
+        state.has_last_strafe_output = true;
+        return out;
+    }
+
+    struct sector_move {
+        float f;
+        float l;
+    };
+    static constexpr sector_move k_sectors[9] = {
+        {-1.0f,  0.0f},  // -180 deg
+        {-1.0f, -1.0f},  // -135 deg
+        { 0.0f, -1.0f},  //  -90 deg
+        { 1.0f, -1.0f},  //  -45 deg
+        { 1.0f,  0.0f},  //    0 deg
+        { 1.0f,  1.0f},  //  +45 deg
+        { 0.0f,  1.0f},  //  +90 deg
+        {-1.0f,  1.0f},  // +135 deg
+        {-1.0f,  0.0f},  // +180 deg
+    };
+
+    const float speed_2d = std::hypot(velocity.x, velocity.y);
+    const bool has_wish = std::fabs(forward_wish) > 0.05f || std::fabs(left_wish) > 0.05f;
+    const float offset_deg =
+        has_wish ? std::atan2(left_wish, forward_wish) * 57.29578f : 0.0f;
+    const float wish_yaw = math::normalize_yaw(camera_yaw + offset_deg);
+
+    int sec_idx = 0;
+    if (speed_2d > 24.4f) {
+        const float vel_yaw = std::atan2(velocity.y, velocity.x) * 57.29578f;
+        const float delta = math::yaw_delta(vel_yaw, wish_yaw);
+        const float center_yaw = (std::fabs(delta) < 10.0f) ? wish_yaw : vel_yaw;
+        const float center_rel = math::yaw_delta(norm_ref, center_yaw);
+        const float base_rel = math::yaw_delta(norm_ref, vel_yaw);
+        if (!state.has_strafe_base_sector ||
+            std::fabs(math::yaw_delta(static_cast<float>(state.strafe_base_sector) * 45.0f,
+                                      base_rel)) > 27.5f) {
+            state.strafe_base_sector =
+                std::clamp(static_cast<int>(std::lround(center_rel / 45.0f)), -4, 4);
+            state.has_strafe_base_sector = true;
+        }
+        sec_idx = wrap_strafe_sector(
+            state.strafe_base_sector + (base.next_strafe_sign > 0 ? 2 : -2));
+    } else {
+        const float rel0 = math::yaw_delta(norm_ref, base.steer_yaw);
+        sec_idx = std::clamp(static_cast<int>(std::lround(rel0 / 45.0f)), -4, 4);
+    }
+
+    const float sec_deg = static_cast<float>(sec_idx) * 45.0f;
+    const float rel = math::yaw_delta(norm_ref, base.steer_yaw);
+    const float raw_tilt = math::yaw_delta(sec_deg, rel);
+    float tilt = std::clamp(raw_tilt, -27.5f, 27.5f);
+    if (state.has_last_strafe_output) {
+        const float tilt_step = tilt - state.last_strafe_tilt;
+        if (std::fabs(tilt_step) > 10.5f) {
+            tilt = std::clamp(state.last_strafe_tilt + std::copysign(10.5f, tilt_step),
+                              -27.5f, 27.5f);
+            const float cur_cmd_yaw = math::normalize_yaw(norm_ref + tilt);
+            sec_idx = std::clamp(
+                static_cast<int>(std::lround(math::yaw_delta(cur_cmd_yaw, base.steer_yaw) / 45.0f)),
+                -4, 4);
+        }
+    }
+    state.last_strafe_tilt = tilt;
+    const float cmd_yaw = math::normalize_yaw(norm_ref + tilt);
+
+    const sector_move sector = k_sectors[sec_idx + 4];
+    out.active = true;
+    out.forwardmove = sector.f;
+    out.leftmove = sector.l;
+    out.steer_yaw = cmd_yaw;
+    state.last_strafe_output = out;
+    state.has_last_strafe_output = true;
     return out;
 }
 

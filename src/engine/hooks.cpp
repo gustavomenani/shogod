@@ -1183,6 +1183,7 @@ void run_tick_pipeline(void* self) {
         g_cm_state.ground_move = {};
         g_cm_state.freestanding = {};
         features::reset_strafe_state(g_cm_state);
+        g_cm_state.bhop_space_latched = false;
         g_cm_state.tick_latch = {};
         g_cm_state.auto_pistol_wait = 0;
         g_cm_state.auto_pistol_release = false;

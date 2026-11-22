@@ -2867,10 +2867,19 @@ TEST(E2E_Tier4, T4_8_300HzBhopSubframePredictionAndAirStrafeContinuity) {
                 do_jump ? sdk::in_button_state::up_down : sdk::in_button_state::up);
 
             if (!latched_on_ground) {
+                features::antiaim_context aa_ctx{};
+                aa_ctx.on_ground = false;
+                aa_ctx.has_move_input = true;
+                aa_ctx.speed_2d = st.tick_latch.speed_2d;
+                aa_ctx.command_number = cmd;
+                aa_ctx.weapon_group = static_cast<int>(config::weapon_group::rifle);
+                aa_ctx.weapon_type = 3;
+                const math::angles aa_air = features::apply_antiaim_full(aa, {11.0f, cam_yaw}, aa_ctx);
                 const auto strafe = features::compute_runtime_air_strafe(
-                    st, cmd, cam_yaw, true, aa, st.tick_latch.velocity, 1.0f, 0.0f);
+                    st, cmd, cam_yaw, aa_air.yaw, st.tick_latch.velocity, 1.0f, 0.0f);
                 EXPECT_TRUE(strafe.active);
-                h.base.viewangles->set(89.0f, strafe.steer_yaw, 0.0f);
+                EXPECT_LE(std::fabs(math::yaw_delta(aa_air.yaw, strafe.steer_yaw)), 27.51f);
+                h.base.viewangles->set(aa_air.pitch, strafe.steer_yaw, 0.0f);
                 h.base.set_forwardmove(strafe.forwardmove);
                 h.base.set_leftmove(strafe.leftmove);
                 features::sync_move_held_buttons(&h.cmd, strafe.forwardmove, strafe.leftmove);

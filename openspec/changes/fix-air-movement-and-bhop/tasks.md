@@ -6,9 +6,9 @@
 ## 2. Limpeza de `CInButtonState` e Estabilização de Auto-Strafe + Anti-Aim Aéreo
 
 - [x] 2.1 Atualizar `sync_move_held_buttons` em `src/features/createmove.hpp` para limpar `held`, `toggle` e `scroll` em `k_move_button_mask`.
-- [x] 2.2 Implementar `step_runtime_strafe_sign` em `src/features/createmove.hpp` com guiagem por delta de yaw da câmera, teclas `A`/`D` e sustentação mínima de lóbulo (`k_min_strafe_lobe_ticks = 4`).
-- [x] 2.3 Desativar `auto_adjust` quando `!on_ground` e manter `at_targets = false` / `freestanding = false` durante `want_autostrafe` aéreo em `src/features/createmove.cpp`.
-- [x] 2.4 Suprimir pré-frenagem `AutoStop` quando `bhop_active && jump_held && (!on_ground || do_jump)` e `!shot_qualified` em `src/features/createmove.cpp`.
+- [x] 2.2 Implementar `compute_runtime_air_strafe` em `src/features/createmove.hpp` ancorado ao `aa_angles.yaw` real (`auto_adjust` + `at_targets` + `freestanding`) com histerese de setor base de `27.5°` e idempotência por `command_number`.
+- [x] 2.3 Preservar `auto_adjust`, `at_targets` e `freestanding` no Anti-Aim aéreo em `src/features/createmove.cpp` para manter a cabeça centralizada em qualquer situação.
+- [x] 2.4 Tornar o BunnyHop resiliente a `ForceButtonState(IN_JUMP)` (`state.bhop_space_latched`), promover aterrissagem mid-tick (`false -> true`) em `tick_latch` e remover subtick step duplicado de `k_in_jump` que disparava `sv_jump_spam_penalty_time` (`0x8bf913`).
 
 ## 3. Testes de Regressão e Verificação
 

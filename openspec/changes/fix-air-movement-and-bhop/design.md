@@ -29,18 +29,17 @@ No CS2 (`client.dll`), o pipeline de input executa `CCSGOInput::vtable[4]` (`0xc
 - **Decisão**: Em `sync_move_held_buttons`, limpar `cmd->button_state.held &= ~k_move_button_mask`, `cmd->button_state.toggle &= ~k_move_button_mask` e `cmd->button_state.scroll &= ~k_move_button_mask` antes de aplicar `move_buttons_for_axes(fwd, left)`.
 - **Racional**: Remove os eventos falsos de `UP_DOWN` e `DOWN_UP` gerados pela divergência entre `CCSGOInput::prev_held` (pós-rotação AA/Auto-Strafe) e `CCSGOInput::physical_held`, estabilizando o AnimGraph2.
 
-### D3: Anti-Aim Aéreo Camera-Relative e `step_runtime_strafe_sign` com Histerese Temporal e Guiagem por Mouse
+### D3: Preservação Integral do Anti-Aim Aéreo (`auto_adjust`, `at_targets`, `freestanding`) e `compute_runtime_air_strafe` com Histerese de Setor
 - **Decisão**:
-  1. Em `run_createmove`, configurar `aa_cfg.auto_adjust = cfg.anti_aim.auto_adjust && on_ground`. Quando `want_autostrafe` estiver ativo (`!on_ground`), forçar `aa_cfg.at_targets = false` e `aa_cfg.freestanding = false`.
-  2. Implementar `step_runtime_strafe_sign` em `createmove.hpp` para uso em `run_createmove`:
-     - Se o jogador pressiona exclusivamente `A` (`pre_aa_left > 0.1f`) ou `D` (`pre_aa_left < -0.1f`), seguir a direção desejada.
-     - Se o jogador move o mouse (`|yaw_delta(last_camera_yaw, camera_yaw)| >= 0.35°`), alinhar `strafe_sign` ao sentido da curva do mouse (`+1` para esquerda, `-1` para direita).
-     - Em linha reta (`W` ou sem rotação de câmera), manter cada lóbulo de strafe por no mínimo `k_min_strafe_lobe_ticks = 4` ticks antes de inverter `strafe_sign`, evitando oscilação de 64 Hz em `leftmove`.
-- **Racional**: Sem `auto_adjust` (+36°) e sem `at_targets` no ar, `ref_yaw` fica em `camera_yaw + 180°` (ou offset fixo configurado), posicionando `steer_yaw` exatamente no centro do setor (`tilt ≈ 0°`, a `22.5°` das fronteiras), onde `+90°` e `-90°` possuem o mesmo resto módulo `45°` (zero snaps de yaw).
+  1. Em `run_createmove`, manter `aa_cfg = cfg.anti_aim; aa_cfg.enabled = true;` tanto no chão quanto no ar (`!on_ground`), preservando `auto_adjust` (`+36°` rifles/snipers, `+18°` pistolas/Zeus), `at_targets` e `freestanding` em todas as situações aéreas para manter a cabeça centralizada.
+  2. Em `compute_runtime_air_strafe` (`src/features/createmove.hpp`), ancorar `ref_yaw` diretamente ao `aa_angles.yaw` calculado por `apply_antiaim_full` e utilizar o wish real do jogador (`strafe_f_wish`, `strafe_l_wish` + `camera_view.yaw`).
+  3. Estabilizar a seleção do setor base de 45° (`state.strafe_base_sector`) com histerese de `27.5°` centrada em `wish_yaw` quando `|delta| < 10.0°`. Como `+90°` e `-90°` são múltiplos exatos de `45°` (`±2 * 45°`), ambos os lados do strafe compartilham a mesma grade de setores, eliminando snaps de `45°` na fronteira de `(k + 0.5) * 45°` em todos os `360°` de `ref_yaw`.
 
-### D4: Supressão de `AutoStop` Pré-Disparo Durante BunnyHop Ativo
-- **Decisão**: Em `run_createmove`, calcular `const bool actively_bhopping = bhop_active && jump_held && (!on_ground || do_jump);`. Quando `actively_bhopping` for verdadeiro, não executar pré-frenagem `AutoStop` enquanto `shot_qualified` for falso.
-- **Racional**: Permite que o jogador mantenha a cadeia de BunnyHop fluida mesmo quando há inimigos penetráveis no mapa, só parando ou atirando no ar quando o hitchance aéreo realmente qualificar o disparo.
+### D4: Resiliência do BunnyHop a `ForceButtonState` (`0xa62520`) e `sv_jump_spam_penalty_time` (`0x8bf800`)
+- **Decisão**:
+  1. Em `run_createmove`, travar `state.bhop_space_latched` enquanto `VK_SPACE` permanecer fisicamente pressionado após o início de um pulo/movimento em jogo, impedindo que `CCSPlayer_MovementServices::FinishMove` / `ResetJumpButton` -> `ForceButtonState(IN_JUMP)` (`client.dll` `0xa62520`) zere `jump_held` durante cadeias contínuas de BunnyHop.
+  2. Em `tick_latch`, promover `state.tick_latch.on_ground = true` caso `raw_on_ground` transicione `false -> true` nos Sub-frames 1..4 do mesmo `command_number`, sem jamais rebaixar `true -> false`.
+  3. Remover `add_subtick_move_step` duplicado para `k_in_jump` em `run_createmove`, mantendo apenas `strip_subtick_buttons(base_cmd, sdk::k_in_jump)` e `cmd->button_state.set_button_state(sdk::k_in_jump, up_down / up)` para evitar múltiplos splits em `0x8dba30` que disparam `sv_jump_spam_penalty_time` (`0.015625s` em `0x8bf913`).
 
 ## Risks / Trade-offs
 

@@ -201,6 +201,7 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         state.ground_move = {};
         state.freestanding = {};
         reset_strafe_state(state);
+        state.bhop_space_latched = false;
         state.tick_latch = {};
         state.auto_pistol_wait = 0;
         state.auto_pistol_release = false;
@@ -233,7 +234,19 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
                                   safe_read(frame.local_pawn + nv.ent_velocity, raw_local_vel) &&
                                   raw_local_vel.finite();
     const float raw_speed_2d = raw_has_velocity ? std::hypot(raw_local_vel.x, raw_local_vel.y) : 0.0f;
-    const bool raw_jump_held = (cmd->button_state.held & sdk::k_in_jump) != 0;
+
+    // CS2 FinishMove / ResetJumpButton calls ForceButtonState(IN_JUMP) at the end of a jump tick,
+    // clearing +jump in CCSGOInput while Spacebar is still physically held. Latch physical Spacebar
+    // once in-game jump/movement is active so continuous BunnyHop never drops a landing jump.
+    const bool raw_cmd_jump = (cmd->button_state.held & sdk::k_in_jump) != 0;
+    const bool vk_space_down = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+    if (raw_cmd_jump ||
+        (vk_space_down && (!raw_on_ground || (cmd->button_state.held & k_move_button_mask) != 0))) {
+        state.bhop_space_latched = vk_space_down;
+    } else if (!vk_space_down) {
+        state.bhop_space_latched = false;
+    }
+    const bool raw_jump_held = raw_cmd_jump || (state.bhop_space_latched && vk_space_down);
 
     // Latch start-of-tick physics and raw movement intent once per command_number so
     // Sub-frame 0 ClientPrediction (which mutates local_pawn FL_ONGROUND and velocity in-place)
@@ -250,8 +263,15 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         state.tick_latch.raw_held = cmd->button_state.held;
         state.tick_latch.pre_aa_fwd = base_cmd->forwardmove;
         state.tick_latch.pre_aa_left = base_cmd->leftmove;
-    } else if (raw_jump_held) {
-        state.tick_latch.jump_held = true;
+    } else {
+        if (raw_jump_held) {
+            state.tick_latch.jump_held = true;
+        }
+        // Promote mid-tick landing (false -> true) discovered by prediction on Sub-frames 1..4,
+        // while never clearing true -> false after Sub-frame 0 already jumped.
+        if (raw_on_ground) {
+            state.tick_latch.on_ground = true;
+        }
     }
 
     const bool on_ground = state.tick_latch.on_ground;
@@ -305,15 +325,10 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
             cmd->button_state.set_button_state(
                 sdk::k_in_jump,
                 bhop_do_jump ? sdk::in_button_state::up_down : sdk::in_button_state::up);
-            if (bhop_do_jump) {
-                if (auto* step = sdk::add_subtick_move_step(anchors, cmd, 0.0f)) {
-                    step->set_button(sdk::k_in_jump);
-                    step->set_pressed(true);
-                }
-            }
         }
     } else {
         state.bhop = {};
+        state.bhop_space_latched = false;
     }
     if (should_run_edge_jump(safe_mode, cfg.misc.movement.edge_jump, bhop_active, jump_held,
                              on_ground, speed_2d, move_type) &&
@@ -328,10 +343,6 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
                 fraction == 1.0f) {
                 strip_subtick_buttons(base_cmd, sdk::k_in_jump);
                 cmd->button_state.set_button_state(sdk::k_in_jump, sdk::in_button_state::up_down);
-                if (auto* step = sdk::add_subtick_move_step(anchors, cmd, 0.0f)) {
-                    step->set_button(sdk::k_in_jump);
-                    step->set_pressed(true);
-                }
             }
         }
     }
@@ -466,13 +477,6 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
 
         config::anti_aim_cfg aa_cfg = cfg.anti_aim;
         aa_cfg.enabled = true;
-        // Grounded standing spine-twist compensation (+36 deg) does not apply in the air;
-        // while airborne with Auto-Strafe active, keep AA camera-relative to prevent mid-air target spins.
-        aa_cfg.auto_adjust = cfg.anti_aim.auto_adjust && on_ground;
-        if (want_autostrafe) {
-            aa_cfg.at_targets = false;
-            aa_cfg.freestanding = false;
-        }
         antiaim_context aa_ctx{};
         aa_ctx.on_ground = on_ground;
         aa_ctx.has_move_input = has_move_input;
@@ -495,12 +499,13 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         state.freestanding = {};
     }
 
-    // Velocity-aligned lobe-stabilized AutoStrafe (zero 45-deg sector snaps, zero 64 Hz button chatter).
+    // Hysteresis-stabilized sector-matched AutoStrafe anchored to aa_angles.yaw (preserving auto_adjust & at_targets).
     bool strafe_applied = false;
     autostrafe_output strafe_out{};
     if (want_autostrafe) {
+        const float ref_yaw = aa_gate ? base_cmd->viewangles->y : camera_view.yaw;
         strafe_out = compute_runtime_air_strafe(
-            state, cmd->command_number, camera_view.yaw, aa_gate, cfg.anti_aim,
+            state, cmd->command_number, camera_view.yaw, ref_yaw,
             local_vel, strafe_f_wish, strafe_l_wish);
         if (strafe_out.active) {
             state.strafe_pending_sign = strafe_out.next_strafe_sign;
