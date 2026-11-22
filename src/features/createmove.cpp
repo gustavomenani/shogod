@@ -262,10 +262,19 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
     }
     const bool raw_jump_held = raw_cmd_jump || (state.bhop_space_latched && vk_space_down);
 
+    std::uintptr_t move_svc = 0;
+    if (nv.pawn_movement_services != 0) {
+        safe_read(frame.local_pawn + nv.pawn_movement_services, move_svc);
+    }
+    std::uint64_t raw_prev_move_buttons = 0;
+    if (move_svc != 0 && nv.move_buttons != 0) {
+        safe_read(move_svc + nv.move_buttons, raw_prev_move_buttons);
+    }
+
     // Latch start-of-tick physics and raw movement intent once per command_number so
-    // Sub-frame 0 ClientPrediction (which mutates local_pawn FL_ONGROUND and velocity in-place)
-    // and sub-frame button reconstruction cannot self-cancel BunnyHop or double-rotate
-    // movement buttons across Sub-frames 1..4 of the same 64 Hz command.
+    // Sub-frame 0 ClientPrediction (which mutates local_pawn FL_ONGROUND, velocity, and
+    // m_nButtons in-place) cannot self-cancel BunnyHop or double-rotate movement inputs
+    // across Sub-frames 1..4 of the same 64 Hz command.
     if (state.tick_latch.command_number != cmd->command_number) {
         state.tick_latch.command_number = cmd->command_number;
         state.tick_latch.on_ground = raw_on_ground;
@@ -274,6 +283,7 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         state.tick_latch.velocity = raw_local_vel;
         state.tick_latch.speed_2d = raw_speed_2d;
         state.tick_latch.jump_held = raw_jump_held;
+        state.tick_latch.prev_jump_held = (raw_prev_move_buttons & sdk::k_in_jump) != 0;
         state.tick_latch.raw_held = cmd->button_state.held;
         state.tick_latch.pre_aa_fwd = base_cmd->forwardmove;
         state.tick_latch.pre_aa_left = base_cmd->leftmove;
@@ -281,11 +291,10 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         if (raw_jump_held) {
             state.tick_latch.jump_held = true;
         }
-        // Promote mid-tick landing (false -> true) discovered by prediction on Sub-frames 1..4,
-        // while never clearing true -> false after Sub-frame 0 already jumped.
-        if (raw_on_ground) {
-            state.tick_latch.on_ground = true;
-        }
+        // Keep start-of-tick `on_ground` and `prev_jump_held` latched from Sub-frame 0.
+        // ClientPrediction mutates `local_pawn->m_fFlags` to the POST-tick state on Sub-frames 1..4;
+        // promoting `on_ground` mid-tick would fire a t=0 jump while the player is still airborne
+        // at tick start, triggering sv_jump_spam_penalty_time and causing a 1-tick ground-stick.
     }
 
     const bool on_ground = state.tick_latch.on_ground;
@@ -323,41 +332,39 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         }
     }
 
-    // ---- Movement assists (Reverie-adapted subtick BunnyHop) ---------------
-    std::uintptr_t move_svc = 0;
-    if (nv.pawn_movement_services != 0) {
-        safe_read(frame.local_pawn + nv.pawn_movement_services, move_svc);
-    }
-
+    // ---- Movement assists (hybrid native + subtick BunnyHop) ---------------
     float next_jump_frac = 0.0f;
     int last_landed_tick = -1;
     float last_landed_frac = 0.0f;
-    if (move_svc != 0 && nv.move_modern_jump != 0 && anchors.from_global_tick != 0) {
-        int client_tick = frame.tick_valid ? frame.tick : 0;
-        if (nv.id_world_group != 0) {
-            std::uintptr_t identity = 0;
-            std::uint32_t world_group = 0;
-            if (nv.ent_identity != 0 && safe_read(frame.local_pawn + nv.ent_identity, identity) &&
-                identity != 0 && safe_read(identity + nv.id_world_group, world_group)) {
-                safe_from_global_tick(anchors.from_global_tick, client_tick, frame.tick,
-                                      world_group);
+    if (move_svc != 0 && nv.move_modern_jump != 0) {
+        const std::uintptr_t mj = move_svc + static_cast<std::uintptr_t>(nv.move_modern_jump);
+        if (anchors.from_global_tick != 0) {
+            int client_tick = frame.tick_valid ? frame.tick : 0;
+            if (nv.id_world_group != 0) {
+                std::uintptr_t identity = 0;
+                std::uint32_t world_group = 0;
+                if (nv.ent_identity != 0 && safe_read(frame.local_pawn + nv.ent_identity, identity) &&
+                    identity != 0 && safe_read(identity + nv.id_world_group, world_group)) {
+                    safe_from_global_tick(anchors.from_global_tick, client_tick, frame.tick,
+                                          world_group);
+                }
+            }
+            int press_tick = 0;
+            float press_frac = 0.0f;
+            float penalty_sec = 0.015625f;
+            sdk::read_cvar_float(anchors.cvar, "sv_jump_spam_penalty_time", penalty_sec);
+            if (nv.jump_last_press_tick != 0 && nv.jump_last_press_frac != 0 &&
+                safe_read(mj + nv.jump_last_press_tick, press_tick) &&
+                safe_read(mj + nv.jump_last_press_frac, press_frac)) {
+                next_jump_frac = compute_next_jump_frac(press_tick, press_frac, client_tick, penalty_sec);
             }
         }
-        const std::uintptr_t mj = move_svc + static_cast<std::uintptr_t>(nv.move_modern_jump);
-        int press_tick = 0;
-        float press_frac = 0.0f;
-        float penalty_sec = 0.015625f;
-        sdk::read_cvar_float(anchors.cvar, "sv_jump_spam_penalty_time", penalty_sec);
-        if (nv.jump_last_press_tick != 0 && nv.jump_last_press_frac != 0 &&
-            safe_read(mj + nv.jump_last_press_tick, press_tick) &&
-            safe_read(mj + nv.jump_last_press_frac, press_frac)) {
-            next_jump_frac = compute_next_jump_frac(press_tick, press_frac, client_tick, penalty_sec);
-        }
-        if (nv.jump_last_landed_tick != 0 && nv.jump_last_landed_frac != 0) {
+        // m_nLastLandedTick is in global tickbase space (matching Reverie Movement.cpp).
+        if (frame.tick_valid && nv.jump_last_landed_tick != 0 && nv.jump_last_landed_frac != 0) {
             int ltick = -1;
             float lfrac = 0.0f;
             if (safe_read(mj + nv.jump_last_landed_tick, ltick) &&
-                safe_read(mj + nv.jump_last_landed_frac, lfrac) && ltick == client_tick &&
+                safe_read(mj + nv.jump_last_landed_frac, lfrac) && ltick == frame.tick &&
                 lfrac >= 0.0f && lfrac < 1.0f) {
                 last_landed_tick = ltick;
                 last_landed_frac = lfrac;
@@ -366,6 +373,7 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
     }
 
     const bool jump_held = state.tick_latch.jump_held;
+    const bool prev_jump_held = state.tick_latch.prev_jump_held;
     const bool valid_move_type = move_type != k_movetype_ladder &&
                                  move_type != k_movetype_noclip &&
                                  move_type != k_movetype_observer;
@@ -374,54 +382,20 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         valid_move_type;
     bool bhop_do_jump = false;
     if (bhop_active) {
-        // Predict mid-tick ground contact while descending so BunnyHop fires PressJump
-        // at the exact landing subtick inside this command instead of sticking for 1 tick.
-        float predicted_land_frac = -1.0f;
-        if (!on_ground && jump_held && has_velocity && local_vel.z < -1.0f &&
-            sdk::trace_ready() && frame.local_origin.finite()) {
-            float sv_grav = 800.0f;
-            sdk::read_cvar_float(anchors.cvar, "sv_gravity", sv_grav);
-            float grav_scale = 1.0f;
-            if (nv.ent_gravity_scale != 0) safe_read(frame.local_pawn + nv.ent_gravity_scale, grav_scale);
-            const float eff_grav = sv_grav * (std::isfinite(grav_scale) && grav_scale > 0.0f ? grav_scale : 1.0f);
-            constexpr float k_dt = 1.0f / 64.0f;
-            const float fall_max = (-local_vel.z) * k_dt + 0.5f * eff_grav * k_dt * k_dt + 3.0f;
-            const float trace_len = fall_max + 2.0f;
-
-            constexpr float k_hull_off[5][2] = {
-                {0.0f, 0.0f}, {13.5f, 13.5f}, {-13.5f, 13.5f}, {13.5f, -13.5f}, {-13.5f, -13.5f}
-            };
-            float min_dist = trace_len + 1.0f;
-            for (const auto& off : k_hull_off) {
-                const float s[3] = {frame.local_origin.x + off[0], frame.local_origin.y + off[1],
-                                    frame.local_origin.z + 2.0f};
-                const float e[3] = {frame.local_origin.x + off[0], frame.local_origin.y + off[1],
-                                    frame.local_origin.z + 2.0f - trace_len};
-                float frac = 1.0f;
-                if (sdk::trace_fraction_skip(s, e, reinterpret_cast<void*>(frame.local_pawn), frac) &&
-                    std::isfinite(frac) && frac >= 0.0f && frac < 1.0f) {
-                    const float dist = std::max(0.0f, frac * trace_len - 2.0f);
-                    min_dist = std::min(min_dist, dist);
-                }
-            }
-            if (min_dist <= fall_max) {
-                predicted_land_frac = predict_landing_subtick_frac(min_dist, local_vel.z, eff_grav);
-            }
-        }
-
         const bool has_subtick_alloc =
             anchors.create_subtick_move != 0 && anchors.add_element_to_rep != 0;
 
         if (state.bhop_jumped_cmd == cmd->command_number) {
             bhop_do_jump = true;
         } else if (next_jump_frac < 1.0f && jump_held) {
+            // Jump only on ground at tick start (Sub-frame 0 on_ground) or an exact mid-tick
+            // landing confirmed by CS2's own CModernJump prediction (never a bullet ray guess).
             const bool modern_landed =
-                last_landed_tick >= 0 && last_landed_frac >= 0.0f && last_landed_frac < 1.0f;
-            const bool landing_this_tick = on_ground || modern_landed || (predicted_land_frac >= 0.0f);
+                !on_ground && last_landed_tick >= 0 &&
+                last_landed_frac >= 0.0f && last_landed_frac < 1.0f && has_subtick_alloc;
+            const bool landing_this_tick = on_ground || modern_landed;
             if (landing_this_tick) {
-                // With CS2 subtick PressJump (rel=false, prs=true), every grounded/landing tick
-                // gets an exact fresh 0->1 edge with zero 1-tick ground-stick release delay.
-                if (has_subtick_alloc) {
+                if (has_subtick_alloc || !prev_jump_held) {
                     bhop_do_jump = true;
                     state.bhop.last_cmd = cmd->command_number;
                     state.bhop.was_on_ground = true;
@@ -431,14 +405,22 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
                     bhop_do_jump = step_bhop(state.bhop, cmd->command_number, true, true);
                 }
                 if (bhop_do_jump) {
-                    float land_w = 0.0f;
-                    if (!on_ground) {
-                        if (modern_landed) land_w = last_landed_frac;
-                        else if (predicted_land_frac >= 0.0f) land_w = predicted_land_frac;
-                    }
+                    const float land_w = modern_landed ? last_landed_frac : 0.0f;
                     state.bhop_jumped_cmd = cmd->command_number;
                     state.bhop_jumped_when =
                         std::clamp(std::max(land_w, next_jump_frac), 0.0f, 62.0f / 64.0f);
+                    state.bhop_used_subtick =
+                        modern_landed || (state.bhop_jumped_when > 0.0f) || prev_jump_held;
+
+                    static ULONGLONG next_bhop_log = 0;
+                    const ULONGLONG now = GetTickCount64();
+                    if (now >= next_bhop_log) {
+                        next_bhop_log = now + 2000;
+                        log::info("bhop: cmd={} gnd={} mland={} prevj={} sub={} when={:.3f} nj={:.3f} spd={:.0f}",
+                                  cmd->command_number, on_ground ? 1 : 0, modern_landed ? 1 : 0,
+                                  prev_jump_held ? 1 : 0, state.bhop_used_subtick ? 1 : 0,
+                                  state.bhop_jumped_when, next_jump_frac, speed_2d);
+                    }
                 }
             } else {
                 bhop_do_jump = step_bhop(state.bhop, cmd->command_number, false, true);
@@ -451,21 +433,27 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         if (jump_held) {
             strip_subtick_buttons(base_cmd, sdk::k_in_jump);
             if (bhop_do_jump && state.bhop_jumped_cmd == cmd->command_number) {
-                auto* rel = sdk::add_subtick_move_step(anchors, cmd, state.bhop_jumped_when);
-                auto* prs = rel ? sdk::add_subtick_move_step(anchors, cmd, state.bhop_jumped_when)
-                                : nullptr;
-                if (rel && prs) {
-                    rel->set_button(sdk::k_in_jump);
-                    rel->set_pressed(false);
-                    prs->set_button(sdk::k_in_jump);
-                    prs->set_pressed(true);
-                    // Avoid toggle|=IN_JUMP at t=0 (which triggers sv_jump_spam_penalty_time on mid-tick
-                    // landings). Keep held=0 for mid-tick landing, held=1 for t=0 grounded jump.
-                    cmd->button_state.set_button_state(
-                        sdk::k_in_jump,
-                        state.bhop_jumped_when > 0.0f ? sdk::in_button_state::up
-                                                      : sdk::in_button_state::down);
+                if (state.bhop_used_subtick && has_subtick_alloc) {
+                    auto* rel = sdk::add_subtick_move_step(anchors, cmd, state.bhop_jumped_when);
+                    auto* prs = rel ? sdk::add_subtick_move_step(anchors, cmd, state.bhop_jumped_when)
+                                    : nullptr;
+                    if (rel && prs) {
+                        rel->set_button(sdk::k_in_jump);
+                        rel->set_pressed(false);
+                        prs->set_button(sdk::k_in_jump);
+                        prs->set_pressed(true);
+                        // Mid-tick landing: keep held=0 at t=0 so CS2 never sees an early air press;
+                        // t=0 grounded jump: keep held=1 (toggle=0) so subtick prs supplies the single edge.
+                        cmd->button_state.set_button_state(
+                            sdk::k_in_jump,
+                            state.bhop_jumped_when > 0.0f ? sdk::in_button_state::up
+                                                          : sdk::in_button_state::down);
+                    } else {
+                        cmd->button_state.set_button_state(sdk::k_in_jump, sdk::in_button_state::up_down);
+                    }
                 } else {
+                    // Clean native 0->1 tick-start press: prev tick had IN_JUMP=0, so up_down
+                    // (held=1, toggle=1) fires CheckJumpButton immediately at t=0 before friction.
                     cmd->button_state.set_button_state(sdk::k_in_jump, sdk::in_button_state::up_down);
                 }
             } else {
@@ -476,6 +464,7 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         state.bhop = {};
         state.bhop_space_latched = false;
         state.bhop_jumped_cmd = -1;
+        state.bhop_used_subtick = false;
     }
     if (should_run_edge_jump(safe_mode, cfg.misc.movement.edge_jump, bhop_active, jump_held,
                              on_ground, speed_2d, move_type) &&

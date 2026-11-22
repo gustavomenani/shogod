@@ -76,6 +76,7 @@ struct tick_input_latch {
     math::vec3 velocity{};
     float speed_2d = 0.0f;
     bool jump_held = false;
+    bool prev_jump_held = false;
     std::uint64_t raw_held = 0;
     float pre_aa_fwd = 0.0f;
     float pre_aa_left = 0.0f;
@@ -118,6 +119,7 @@ struct createmove_state {
     bool bhop_space_latched = false;
     int bhop_jumped_cmd = -1;
     float bhop_jumped_when = 0.0f;
+    bool bhop_used_subtick = false;
     tick_input_latch tick_latch{};
     int auto_pistol_wait = 0;
     int last_auto_pistol_cmd = -1;
