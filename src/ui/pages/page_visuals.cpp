@@ -118,15 +118,16 @@ void visuals(config::store& cfg, const status& live) {
                 std::span<const std::pair<int, int>>(model.connections,
                                                      static_cast<std::size_t>(model.connection_count)));
             const float avail_w = (std::max)(80.0f, ImGui::GetContentRegionAvail().x - 2.0f);
-            preview::shared_panel().draw(ImVec2(avail_w, 244.0f), preview::shared_camera(),
+            preview::shared_panel().draw(ImVec2(avail_w, 304.0f), preview::shared_camera(),
                                          *preview_mats[preview_target], c.visuals.skeleton,
-                                         &c.visuals, k_preview_tags[preview_target]);
+                                         &c.visuals, k_preview_tags[preview_target], &c.visuals);
 
-            // Stance selector footer: [ < ]   Combat stance  1/3   [ > ]
+            // Stance selector footer: [ < ]   Combat stance  1/3   [ > ]  [Reset]
             const int cur_stance = static_cast<int>(preview::shared_panel().current_stance());
             const int stance_count = static_cast<int>(preview::stance::count);
             const float row_w = avail_w;
             const float arrow_w = 34.0f;
+            const float reset_w = 62.0f;
             const float row_x = ImGui::GetCursorPosX();
             const float row_y = ImGui::GetCursorPosY() + 2.0f;
             ImGui::SetCursorPos(ImVec2(row_x, row_y));
@@ -137,15 +138,19 @@ void visuals(config::store& cfg, const status& live) {
             }
             ImGui::PopID();
             const ImVec2 txt_sz = ImGui::CalcTextSize(k_stance_names[cur_stance]);
-            ImGui::SetCursorPos(ImVec2(row_x + (row_w - txt_sz.x) * 0.5f, row_y + 4.0f));
+            ImGui::SetCursorPos(ImVec2(row_x + (row_w - reset_w - 6.0f - txt_sz.x) * 0.5f, row_y + 4.0f));
             ImGui::TextDisabled("%s", k_stance_names[cur_stance]);
-            ImGui::SetCursorPos(ImVec2(row_x + row_w - arrow_w, row_y));
+            ImGui::SetCursorPos(ImVec2(row_x + row_w - arrow_w - reset_w - 4.0f, row_y));
             ImGui::PushID("stance_next");
             if (action_button(">", ImVec2(arrow_w, 24.0f))) {
                 const int next = (cur_stance + 1) % stance_count;
                 preview::shared_panel().set_stance(static_cast<preview::stance>(next));
             }
             ImGui::PopID();
+            ImGui::SetCursorPos(ImVec2(row_x + row_w - reset_w, row_y));
+            if (action_button("Reset", ImVec2(reset_w, 24.0f))) {
+                c.visuals.esp_layout = config::default_esp_layout();
+            }
         }
         end_card();
     }

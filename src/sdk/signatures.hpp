@@ -80,6 +80,7 @@ struct anchors {
     void* setup_light = nullptr;
     void* setup_tonemap = nullptr;
     void* setup_sky_params = nullptr;
+    void* play_vsnd = nullptr;  // soundsystem.dll PlayVsnd(const char*)
 
     std::uintptr_t client_base = 0;
     std::size_t client_size = 0;

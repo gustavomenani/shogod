@@ -1,6 +1,8 @@
 #include "features/esp/esp.hpp"
 
 #include "config/bind_state.hpp"
+#include "features/audio/hitsounds.hpp"
+#include "features/esp/esp_layout.hpp"
 
 #include "brand.hpp"
 #include "imgui.h"
@@ -13,6 +15,11 @@
 #include <cmath>
 #include <cstdio>
 #include <string_view>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 namespace shogod::features::esp {
 namespace {
@@ -205,7 +212,8 @@ bool draw_weapon_icon(ImDrawList* dl, const sdk::player_snapshot& p, float cente
     return true;
 }
 
-void draw_keybinds(ImDrawList* dl, const config::config_v1& cfg, const ui::status& live) {
+void draw_keybinds(ImDrawList* dl, const config::config_v1& cfg, const ui::status& live,
+                   float min_y = 260.0f) {
     using config::bound_feature;
     const auto active = [&](bound_feature feature, bool enabled) {
         return live.binds_sampled ? (live.active_binds & config::feature_bit(feature)) != 0 : enabled;
@@ -233,7 +241,7 @@ void draw_keybinds(ImDrawList* dl, const config::config_v1& cfg, const ui::statu
     if (active_count == 0) return;
 
     const float x = 14.0f;
-    float y = 260.0f;
+    float y = std::max(260.0f, min_y);
     const float w = 160.0f;
     const float h = 22.0f + active_count * 18.0f + 6.0f;
     const float row_h = 18.0f;
@@ -248,6 +256,83 @@ void draw_keybinds(ImDrawList* dl, const config::config_v1& cfg, const ui::statu
         dl->AddText(ImVec2(x + 8.0f, y), IM_COL32(200, 206, 218, 230), it.name);
         dl->AddText(ImVec2(x + w - 28.0f, y), pal.accent, "[on]");
         y += row_h;
+    }
+}
+
+float draw_spectators(ImDrawList* dl, const sdk::frame_snapshot* frame) {
+    if (!frame || !frame->in_game || frame->spectator_count <= 0) return 0.0f;
+
+    const int n = std::min(frame->spectator_count, sdk::k_max_spectators);
+    float max_name_w = ImGui::CalcTextSize("Spectators").x + 36.0f;
+    for (int i = 0; i < n; ++i) {
+        max_name_w = std::max(max_name_w, ImGui::CalcTextSize(frame->spectators[i].name).x + 34.0f);
+    }
+    const float x = 14.0f;
+    const float top_y = 64.0f;
+    float y = top_y;
+    const float w = std::clamp(max_name_w, 160.0f, 250.0f);
+    const float row_h = 18.0f;
+    const float h = 24.0f + static_cast<float>(n) * row_h + 6.0f;
+    const auto& pal = ui::colors();
+
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(14, 17, 24, 236), 5.0f);
+    dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h), pal.border, 5.0f);
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + 2.0f), pal.accent, 2.0f);
+    dl->AddText(ImVec2(x + 9.0f, y + 5.0f), IM_COL32(238, 242, 248, 242), "Spectators");
+
+    y += 24.0f;
+    for (int i = 0; i < n; ++i) {
+        const auto& sp = frame->spectators[i];
+        const ImU32 team_dot = (sp.team == 2)   ? IM_COL32(235, 200, 120, 235)
+                               : (sp.team == 3) ? IM_COL32(140, 195, 245, 235)
+                                                : IM_COL32(210, 214, 224, 220);
+        dl->AddCircleFilled(ImVec2(x + 12.0f, y + 7.5f), 2.5f, team_dot);
+        dl->AddText(ImVec2(x + 21.0f, y), IM_COL32(210, 216, 228, 235), sp.name);
+        y += row_h;
+    }
+    return top_y + h;
+}
+
+void draw_hitmarker(ImDrawList* dl, const config::config_v1& cfg, const sdk::frame_snapshot* frame,
+                    int sw, int sh) {
+    if (!cfg.misc.info.hitmarker || !frame || !frame->in_game || !frame->local_alive) return;
+    bool headshot = false;
+    const float alpha = features::audio::hitmarker_alpha(GetTickCount64(), headshot);
+    if (alpha <= 0.0f) return;
+
+    const ImVec2 c(static_cast<float>(sw) * 0.5f, static_cast<float>(sh) * 0.5f);
+    const config::rgba base_col = headshot
+        ? config::rgba{1.0f, 0.35f, 0.35f, cfg.misc.info.hitmarker_color.a}
+        : cfg.misc.info.hitmarker_color;
+    const ImU32 col = IM_COL32(static_cast<int>(base_col.r * 255.0f),
+                               static_cast<int>(base_col.g * 255.0f),
+                               static_cast<int>(base_col.b * 255.0f),
+                               std::clamp(static_cast<int>(base_col.a * alpha * 255.0f), 0, 255));
+    const ImU32 shadow = IM_COL32(0, 0, 0, std::clamp(static_cast<int>(alpha * 180.0f), 0, 255));
+    const float inner = 4.0f;
+    const float outer = headshot ? 11.0f : 9.0f;
+    for (int sx : {-1, 1}) {
+        for (int sy : {-1, 1}) {
+            const ImVec2 p0(c.x + static_cast<float>(sx) * inner, c.y + static_cast<float>(sy) * inner);
+            const ImVec2 p1(c.x + static_cast<float>(sx) * outer, c.y + static_cast<float>(sy) * outer);
+            dl->AddLine(ImVec2(p0.x + 1.0f, p0.y + 1.0f), ImVec2(p1.x + 1.0f, p1.y + 1.0f),
+                        shadow, 2.0f);
+            dl->AddLine(p0, p1, col, 1.5f);
+        }
+    }
+}
+
+void draw_bar_glow(ImDrawList* dl, ImVec2 min_p, ImVec2 max_p, ImU32 col) {
+    if (!dl || max_p.x <= min_p.x || max_p.y <= min_p.y) return;
+    const int r = (col >> IM_COL32_R_SHIFT) & 0xFF;
+    const int g = (col >> IM_COL32_G_SHIFT) & 0xFF;
+    const int b = (col >> IM_COL32_B_SHIFT) & 0xFF;
+    const int a = (col >> IM_COL32_A_SHIFT) & 0xFF;
+    for (int step = 1; step <= 3; ++step) {
+        const float pad = static_cast<float>(step) * 1.4f;
+        const int ga = (a * (4 - step)) / 14;
+        dl->AddRectFilled(ImVec2(min_p.x - pad, min_p.y - pad),
+                          ImVec2(max_p.x + pad, max_p.y + pad), IM_COL32(r, g, b, ga), 1.5f);
     }
 }
 
@@ -305,7 +390,11 @@ draw_stats draw(const config::config_v1& cfg, const sdk::frame_snapshot* frame,
     if (dl == nullptr || screen_w <= 0 || screen_h <= 0) return {};
 
     if (cfg.misc.info.watermark) draw_watermark(dl, live, screen_w);
-    if (cfg.misc.info.keybind_list) draw_keybinds(dl, cfg, live);
+    const float spec_bottom = cfg.misc.info.spectator_list ? draw_spectators(dl, frame) : 0.0f;
+    if (cfg.misc.info.keybind_list) {
+        draw_keybinds(dl, cfg, live, spec_bottom > 0.0f ? (spec_bottom + 8.0f) : 260.0f);
+    }
+    draw_hitmarker(dl, cfg, frame, screen_w, screen_h);
 
     if (frame == nullptr || !frame->in_game || !frame->view_matrix.usable_projection()) return {};
 
@@ -352,7 +441,7 @@ draw_stats draw(const config::config_v1& cfg, const sdk::frame_snapshot* frame,
 
         if (cfg.visuals.skeleton && p.bone_count > 0) {
             draw_skeleton(dl, p.bones, p.bone_count, frame->view_matrix, screen_w, screen_h,
-                          scale_alpha(IM_COL32(240, 245, 255, 210), shade));
+                          with_alpha(cfg.visuals.skeleton_color, shade));
         }
 
         const screen_box box = compute_player_box(p, frame->view_matrix, screen_w, screen_h);
@@ -390,104 +479,279 @@ draw_stats draw(const config::config_v1& cfg, const sdk::frame_snapshot* frame,
 
         if (dl->VtxBuffer.Size > vertices_before_box) ++stats.boxes;
 
+        // Shared layout pass matching interactive 3D Preview placement & ordering.
+        std::vector<layout_item> layout_items;
+        layout_items.reserve(config::k_esp_elem_count);
+
+        const auto slot_for = [&](config::esp_elem_id eid) -> const config::esp_elem_slot& {
+            return cfg.visuals.esp_layout[static_cast<std::size_t>(eid)];
+        };
+        const auto add_elem = [&](config::esp_elem_id eid, float w, float h, bool full_span) {
+            const auto& slot = slot_for(eid);
+            layout_item it{};
+            it.id = static_cast<int>(eid);
+            it.side = std::clamp(slot.side, 0, 3);
+            it.order = slot.order;
+            it.sz = {w, h, full_span, 0.0f};
+            layout_items.push_back(it);
+        };
+
         if (cfg.visuals.health_bar) {
-            const float hp_frac = std::clamp(static_cast<float>(p.health) / 100.0f, 0.0f, 1.0f);
-            const float bx = std::clamp(box.x >= 9.0f ? box.x - 8.0f : box.x + 2.0f,
-                                        1.0f, std::max(1.0f, static_cast<float>(screen_w) - 6.0f));
-            const float fill_h = box.h * hp_frac;
-            const ImU32 hp_col = scale_alpha(
-                IM_COL32(static_cast<int>((1.0f - hp_frac) * 230.0f + 25.0f),
-                         static_cast<int>(hp_frac * 220.0f + 25.0f), 60, 255),
-                alpha);
-            dl->AddRectFilled(ImVec2(bx - 1, box.y - 1), ImVec2(bx + 5, box.y + box.h + 1), outline);
-            dl->AddRectFilled(ImVec2(bx, box.y + box.h - fill_h), ImVec2(bx + 4, box.y + box.h),
-                              hp_col);
-            ++stats.health_bars;
-            if (p.health < 100) {
-                char hp_txt[16]{};
-                std::snprintf(hp_txt, sizeof hp_txt, "%d", p.health);
-                const float hp_x = bx >= 23.0f ? bx - 22.0f : bx + 6.0f;
-                dl->AddText(ImVec2(hp_x, std::max(0.0f, box.y + box.h - fill_h - 6.0f)),
-                            scale_alpha(IM_COL32(255, 255, 255, 230), alpha), hp_txt);
+            const int s = slot_for(config::esp_elem_id::health_bar).side;
+            add_elem(config::esp_elem_id::health_bar, is_horizontal_side(s) ? box.w : 4.0f,
+                     is_horizontal_side(s) ? 4.0f : box.h, true);
+        }
+        if (cfg.visuals.armor_bar && p.armor > 0) {
+            const int s = slot_for(config::esp_elem_id::armor_bar).side;
+            add_elem(config::esp_elem_id::armor_bar, is_horizontal_side(s) ? box.w : 3.0f,
+                     is_horizontal_side(s) ? 3.0f : box.h, true);
+        }
+        if (cfg.visuals.name && p.name[0] != '\0') {
+            const ImVec2 tsz = ImGui::CalcTextSize(p.name);
+            add_elem(config::esp_elem_id::name, tsz.x, tsz.y, false);
+        }
+        const bool has_icon =
+            cfg.visuals.weapon_icon && (p.weapon_id != 0 || p.weapon_name[0] != '\0');
+        if (has_icon) {
+            add_elem(config::esp_elem_id::weapon_icon, 36.0f, 13.0f, false);
+        }
+        const auto* spec = resolve_weapon_spec(p);
+        const char* wep_label = (spec && spec->name[0] != '\0') ? spec->name : p.weapon_name;
+        const bool has_name = cfg.visuals.weapon && wep_label[0] != '\0';
+        if (has_name) {
+            const ImVec2 tsz = ImGui::CalcTextSize(wep_label);
+            add_elem(config::esp_elem_id::weapon_name, tsz.x, tsz.y, false);
+        }
+        char ammo_buf[16]{};
+        const bool has_ammo = cfg.visuals.ammo && p.ammo >= 0;
+        if (has_ammo) {
+            std::snprintf(ammo_buf, sizeof ammo_buf, "[%d]", p.ammo);
+            const ImVec2 tsz = ImGui::CalcTextSize(ammo_buf);
+            add_elem(config::esp_elem_id::ammo, tsz.x, tsz.y, false);
+        }
+        char dist_buf[24]{};
+        if (cfg.visuals.distance) {
+            const float dist_m = (p.origin - frame->local_origin).length() * 0.01905f;
+            std::snprintf(dist_buf, sizeof dist_buf, "%.0fm", dist_m);
+            const ImVec2 tsz = ImGui::CalcTextSize(dist_buf);
+            add_elem(config::esp_elem_id::distance, tsz.x, tsz.y, false);
+        }
+
+        char money_buf[24]{};
+        char ping_buf[16]{};
+        if (cfg.visuals.flags) {
+            auto add_flag_txt = [&](config::esp_elem_id fid, const char* txt) {
+                const ImVec2 tsz = ImGui::CalcTextSize(txt);
+                add_elem(fid, tsz.x, tsz.y, false);
+            };
+            if (cfg.visuals.flag_scoped && p.scoped) add_flag_txt(config::esp_elem_id::flag_scoped, "ZOOM");
+            if (cfg.visuals.flag_defuse && p.defusing) add_flag_txt(config::esp_elem_id::flag_defuse, "DEFUSE");
+            if (cfg.visuals.flag_flash && p.flashing) add_flag_txt(config::esp_elem_id::flag_flash, "FLASH");
+            if (cfg.visuals.flag_kit && p.has_kit) add_flag_txt(config::esp_elem_id::flag_kit, "KIT");
+            if (cfg.visuals.flag_reload && p.reloading) add_flag_txt(config::esp_elem_id::flag_reload, "RELOAD");
+            if (cfg.visuals.flag_armor && p.armor > 0) {
+                add_flag_txt(config::esp_elem_id::flag_armor, p.helmet ? "HK" : "K");
+            }
+            if (cfg.visuals.flag_money && p.money > 0) {
+                std::snprintf(money_buf, sizeof money_buf, "$%d", p.money);
+                add_flag_txt(config::esp_elem_id::flag_money, money_buf);
+            }
+            if (cfg.visuals.flag_ping && p.ping > 0) {
+                std::snprintf(ping_buf, sizeof ping_buf, "%dms", p.ping);
+                add_flag_txt(config::esp_elem_id::flag_ping, ping_buf);
             }
         }
 
-        if (cfg.visuals.armor_bar && p.armor > 0) {
-            const float ar_frac = std::clamp(static_cast<float>(p.armor) / 100.0f, 0.0f, 1.0f);
-            const float ay = box.y + box.h + 3.0f;
-            dl->AddRectFilled(ImVec2(box.x - 1, ay - 1), ImVec2(box.x + box.w + 1, ay + 3), outline);
-            dl->AddRectFilled(ImVec2(box.x, ay), ImVec2(box.x + box.w * ar_frac, ay + 2),
-                              scale_alpha(IM_COL32(95, 175, 255, 245), alpha));
-            ++stats.armor_bars;
-        }
+        compute_layout(layout_items, box.x, box.y, box.x + box.w, box.y + box.h, 4.0f, 3.0f, 1.0f);
 
-        if (cfg.visuals.name && p.name[0] != '\0') {
-            const ImVec2 tsz = ImGui::CalcTextSize(p.name);
-            dl->AddText(ImVec2(box.x + (box.w - tsz.x) * 0.5f, box.y - tsz.y - 2.0f),
-                        scale_alpha(IM_COL32(242, 245, 250, 240), alpha), p.name);
-        }
+        for (const auto& it : layout_items) {
+            const float x0 = it.box.min_x;
+            const float y0 = it.box.min_y;
+            const float x1 = it.box.max_x;
+            const float y1 = it.box.max_y;
+            const float cx = (x0 + x1) * 0.5f;
+            const bool horiz = is_horizontal_side(it.side);
 
-        float bottom_y = box.y + box.h + (cfg.visuals.armor_bar && p.armor > 0 ? 6.0f : 3.0f);
-        const float center_x = box.x + box.w * 0.5f;
-        const bool has_icon = cfg.visuals.weapon_icon && (p.weapon_id != 0 || p.weapon_name[0] != '\0');
-        const bool has_name = cfg.visuals.weapon && p.weapon_name[0] != '\0';
-        const bool has_ammo = cfg.visuals.ammo && p.ammo >= 0;
-        const bool has_dist = cfg.visuals.distance;
-        const float weapon_height = (has_icon ? 15.0f : 0.0f) +
-            ImGui::GetTextLineHeightWithSpacing() * ((has_name ? 1 : 0) + (has_ammo ? 1 : 0) + (has_dist ? 1 : 0));
-        if (weapon_height > 0.0f) {
-            bottom_y = std::clamp(bottom_y, 0.0f,
-                                  std::max(0.0f, static_cast<float>(screen_h) - weapon_height));
-        }
-        const auto weapon_color = scale_alpha(IM_COL32(215, 222, 235, 230), alpha);
-        if (has_icon && draw_weapon_icon(dl, p, std::clamp(center_x, 22.0f,
-                                   std::max(22.0f, static_cast<float>(screen_w) - 22.0f)),
-                                        bottom_y, weapon_color)) {
-            bottom_y += 15.0f;
-            ++stats.weapon_icons;
-        }
-        const auto weapon_text = [&](const char* value) {
-            const auto size = ImGui::CalcTextSize(value);
-            const float x = std::clamp(center_x - size.x * 0.5f, 0.0f,
-                                       std::max(0.0f, static_cast<float>(screen_w) - size.x));
-            dl->AddText(ImVec2(x, bottom_y), weapon_color, value);
-            bottom_y += ImGui::GetTextLineHeightWithSpacing();
-        };
-        if (has_name) {
-            const auto* spec = resolve_weapon_spec(p);
-            weapon_text(spec ? spec->name : p.weapon_name);
-            ++stats.weapon_names;
-        }
-        if (has_ammo) {
-            char ammo[16]{};
-            std::snprintf(ammo, sizeof ammo, "[%d]", p.ammo);
-            weapon_text(ammo);
-            ++stats.ammo_labels;
-        }
-
-        if (cfg.visuals.distance) {
-            const float dist_m = (p.origin - frame->local_origin).length() * 0.01905f;
-            char dbuf[24]{};
-            std::snprintf(dbuf, sizeof dbuf, "%.0fm", dist_m);
-            const ImVec2 dsz = ImGui::CalcTextSize(dbuf);
-            dl->AddText(ImVec2(box.x + (box.w - dsz.x) * 0.5f, bottom_y),
-                        scale_alpha(IM_COL32(175, 185, 200, 210), alpha), dbuf);
-        }
-
-        if (cfg.visuals.flags) {
-            float fy = box.y;
-            const float fx = box.x + box.w + 4.0f;
-            auto flag = [&](const char* txt, ImU32 col) {
-                dl->AddText(ImVec2(fx, fy), scale_alpha(col, alpha), txt);
-                fy += 13.0f;
-            };
-            if (p.scoped) flag("ZOOM", IM_COL32(125, 210, 255, 235));
-            if (p.defusing) flag("DEFUSE", IM_COL32(255, 110, 95, 245));
-            if (p.flashing) flag("FLASH", IM_COL32(255, 225, 120, 235));
-            if (p.has_kit) flag("KIT", IM_COL32(160, 235, 160, 220));
+            switch (static_cast<config::esp_elem_id>(it.id)) {
+                case config::esp_elem_id::health_bar: {
+                    const float hp_frac = std::clamp(static_cast<float>(p.health) / 100.0f, 0.0f, 1.0f);
+                    const ImU32 hp_top = cfg.visuals.health_bar_gradient
+                        ? with_alpha(cfg.visuals.health_bar_grad_color, alpha)
+                        : with_alpha(cfg.visuals.health_bar_color, alpha);
+                    const ImU32 hp_bot = with_alpha(cfg.visuals.health_bar_color, alpha);
+                    if (cfg.visuals.health_bar_glow) {
+                        draw_bar_glow(dl, ImVec2(x0, y0), ImVec2(x1, y1), hp_bot);
+                    }
+                    dl->AddRectFilled(ImVec2(x0 - 1, y0 - 1), ImVec2(x1 + 1, y1 + 1), outline);
+                    if (horiz) {
+                        const float fill_w = (x1 - x0) * hp_frac;
+                        dl->AddRectFilledMultiColor(ImVec2(x0, y0), ImVec2(x0 + fill_w, y1),
+                                                    hp_top, hp_bot, hp_bot, hp_top);
+                    } else {
+                        const float fill_h = (y1 - y0) * hp_frac;
+                        dl->AddRectFilledMultiColor(ImVec2(x0, y1 - fill_h), ImVec2(x1, y1),
+                                                    hp_top, hp_top, hp_bot, hp_bot);
+                    }
+                    ++stats.health_bars;
+                    if (p.health < 100) {
+                        char hp_txt[16]{};
+                        std::snprintf(hp_txt, sizeof hp_txt, "%d", p.health);
+                        const float fill_h = (y1 - y0) * hp_frac;
+                        const ImVec2 hsz = ImGui::CalcTextSize(hp_txt);
+                        const float hx = horiz ? (x0 + (x1 - x0) * hp_frac - hsz.x * 0.5f)
+                                               : (it.side == side_right ? x1 + 2.0f : x0 - hsz.x - 2.0f);
+                        const float hy = horiz ? (y0 - hsz.y * 0.35f)
+                                               : std::max(0.0f, y1 - fill_h - hsz.y * 0.5f);
+                        dl->AddText(ImVec2(hx, hy), scale_alpha(IM_COL32(255, 255, 255, 235), alpha),
+                                    hp_txt);
+                    }
+                    break;
+                }
+                case config::esp_elem_id::armor_bar: {
+                    const float ar_frac = std::clamp(static_cast<float>(p.armor) / 100.0f, 0.0f, 1.0f);
+                    const ImU32 ar_col = with_alpha(cfg.visuals.armor_bar_color, alpha);
+                    if (cfg.visuals.armor_bar_glow) {
+                        draw_bar_glow(dl, ImVec2(x0, y0), ImVec2(x1, y1), ar_col);
+                    }
+                    dl->AddRectFilled(ImVec2(x0 - 1, y0 - 1), ImVec2(x1 + 1, y1 + 1), outline);
+                    if (horiz) {
+                        dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + (x1 - x0) * ar_frac, y1), ar_col);
+                    } else {
+                        dl->AddRectFilled(ImVec2(x0, y1 - (y1 - y0) * ar_frac), ImVec2(x1, y1), ar_col);
+                    }
+                    ++stats.armor_bars;
+                    break;
+                }
+                case config::esp_elem_id::name:
+                    dl->AddText(ImVec2(x0, y0), with_alpha(cfg.visuals.name_color, alpha), p.name);
+                    break;
+                case config::esp_elem_id::weapon_icon:
+                    if (draw_weapon_icon(
+                            dl, p,
+                            std::clamp(cx, 22.0f, std::max(22.0f, static_cast<float>(screen_w) - 22.0f)),
+                            y0, with_alpha(cfg.visuals.weapon_icon_color, alpha))) {
+                        ++stats.weapon_icons;
+                    }
+                    break;
+                case config::esp_elem_id::weapon_name:
+                    dl->AddText(ImVec2(x0, y0), with_alpha(cfg.visuals.weapon_color, alpha), wep_label);
+                    ++stats.weapon_names;
+                    break;
+                case config::esp_elem_id::ammo:
+                    dl->AddText(ImVec2(x0, y0), with_alpha(cfg.visuals.ammo_color, alpha), ammo_buf);
+                    ++stats.ammo_labels;
+                    break;
+                case config::esp_elem_id::distance:
+                    dl->AddText(ImVec2(x0, y0), with_alpha(cfg.visuals.distance_color, alpha), dist_buf);
+                    break;
+                case config::esp_elem_id::flag_scoped:
+                    dl->AddText(ImVec2(x0, y0), scale_alpha(IM_COL32(125, 210, 255, 235), alpha), "ZOOM");
+                    break;
+                case config::esp_elem_id::flag_defuse:
+                    dl->AddText(ImVec2(x0, y0), scale_alpha(IM_COL32(255, 110, 95, 245), alpha), "DEFUSE");
+                    break;
+                case config::esp_elem_id::flag_flash:
+                    dl->AddText(ImVec2(x0, y0), scale_alpha(IM_COL32(255, 225, 120, 235), alpha), "FLASH");
+                    break;
+                case config::esp_elem_id::flag_kit:
+                    dl->AddText(ImVec2(x0, y0), scale_alpha(IM_COL32(160, 235, 160, 220), alpha), "KIT");
+                    break;
+                case config::esp_elem_id::flag_reload:
+                    dl->AddText(ImVec2(x0, y0), scale_alpha(IM_COL32(255, 185, 95, 235), alpha), "RELOAD");
+                    break;
+                case config::esp_elem_id::flag_armor:
+                    dl->AddText(ImVec2(x0, y0), scale_alpha(IM_COL32(165, 205, 255, 225), alpha),
+                                p.helmet ? "HK" : "K");
+                    break;
+                case config::esp_elem_id::flag_money:
+                    dl->AddText(ImVec2(x0, y0), scale_alpha(IM_COL32(140, 235, 140, 225), alpha), money_buf);
+                    break;
+                case config::esp_elem_id::flag_ping:
+                    dl->AddText(ImVec2(x0, y0), scale_alpha(IM_COL32(205, 212, 226, 215), alpha), ping_buf);
+                    break;
+                default:
+                    break;
+            }
         }
     }
     return stats;
+}
+
+float draw_spectators(ImDrawList* dl, const sdk::frame_snapshot* frame) {
+    if (!frame || !frame->in_game || frame->spectator_count <= 0) return 0.0f;
+
+    const int n = std::min(frame->spectator_count, sdk::k_max_spectators);
+    float max_name_w = ImGui::CalcTextSize("Spectators").x + 36.0f;
+    for (int i = 0; i < n; ++i) {
+        max_name_w = std::max(max_name_w, ImGui::CalcTextSize(frame->spectators[i].name).x + 34.0f);
+    }
+    const float x = 14.0f;
+    const float top_y = 64.0f;
+    float y = top_y;
+    const float w = std::clamp(max_name_w, 160.0f, 250.0f);
+    const float row_h = 18.0f;
+    const float h = 24.0f + static_cast<float>(n) * row_h + 6.0f;
+    const auto& pal = ui::colors();
+
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(14, 17, 24, 236), 5.0f);
+    dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h), pal.border, 5.0f);
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + 2.0f), pal.accent, 2.0f);
+    dl->AddText(ImVec2(x + 9.0f, y + 5.0f), IM_COL32(238, 242, 248, 242), "Spectators");
+
+    y += 24.0f;
+    for (int i = 0; i < n; ++i) {
+        const auto& sp = frame->spectators[i];
+        const ImU32 team_dot = (sp.team == 2)   ? IM_COL32(235, 200, 120, 235)
+                               : (sp.team == 3) ? IM_COL32(140, 195, 245, 235)
+                                                : IM_COL32(210, 214, 224, 220);
+        dl->AddCircleFilled(ImVec2(x + 12.0f, y + 7.5f), 2.5f, team_dot);
+        dl->AddText(ImVec2(x + 21.0f, y), IM_COL32(210, 216, 228, 235), sp.name);
+        y += row_h;
+    }
+    return top_y + h;
+}
+
+void draw_hitmarker(ImDrawList* dl, const config::config_v1& cfg, const sdk::frame_snapshot* frame,
+                    int sw, int sh) {
+    if (!cfg.misc.info.hitmarker || !frame || !frame->in_game || !frame->local_alive) return;
+    bool headshot = false;
+    const float alpha = features::audio::hitmarker_alpha(GetTickCount64(), headshot);
+    if (alpha <= 0.0f) return;
+
+    const ImVec2 c(static_cast<float>(sw) * 0.5f, static_cast<float>(sh) * 0.5f);
+    const config::rgba base_col = headshot
+        ? config::rgba{1.0f, 0.35f, 0.35f, cfg.misc.info.hitmarker_color.a}
+        : cfg.misc.info.hitmarker_color;
+    const ImU32 col = IM_COL32(static_cast<int>(base_col.r * 255.0f),
+                               static_cast<int>(base_col.g * 255.0f),
+                               static_cast<int>(base_col.b * 255.0f),
+                               std::clamp(static_cast<int>(base_col.a * alpha * 255.0f), 0, 255));
+    const ImU32 shadow = IM_COL32(0, 0, 0, std::clamp(static_cast<int>(alpha * 180.0f), 0, 255));
+    const float inner = 4.0f;
+    const float outer = headshot ? 11.0f : 9.0f;
+    for (int sx : {-1, 1}) {
+        for (int sy : {-1, 1}) {
+            const ImVec2 p0(c.x + static_cast<float>(sx) * inner, c.y + static_cast<float>(sy) * inner);
+            const ImVec2 p1(c.x + static_cast<float>(sx) * outer, c.y + static_cast<float>(sy) * outer);
+            dl->AddLine(ImVec2(p0.x + 1.0f, p0.y + 1.0f), ImVec2(p1.x + 1.0f, p1.y + 1.0f),
+                        shadow, 2.0f);
+            dl->AddLine(p0, p1, col, 1.5f);
+        }
+    }
+}
+
+void draw_bar_glow(ImDrawList* dl, ImVec2 min_p, ImVec2 max_p, ImU32 col) {
+    if (!dl || max_p.x <= min_p.x || max_p.y <= min_p.y) return;
+    const int r = (col >> IM_COL32_R_SHIFT) & 0xFF;
+    const int g = (col >> IM_COL32_G_SHIFT) & 0xFF;
+    const int b = (col >> IM_COL32_B_SHIFT) & 0xFF;
+    const int a = (col >> IM_COL32_A_SHIFT) & 0xFF;
+    for (int step = 1; step <= 3; ++step) {
+        const float pad = static_cast<float>(step) * 1.4f;
+        const int ga = (a * (4 - step)) / 14;
+        dl->AddRectFilled(ImVec2(min_p.x - pad, min_p.y - pad),
+                          ImVec2(max_p.x + pad, max_p.y + pad), IM_COL32(r, g, b, ga), 1.5f);
+    }
 }
 
 }  // namespace shogod::features::esp

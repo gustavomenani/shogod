@@ -39,13 +39,14 @@ set(SHOGOD_CORE_SOURCES
     src/features/backtrack.cpp
     src/features/rage/target.cpp
     src/features/aaa/antiaim.cpp
+    src/features/audio/hitsounds.cpp
 )
 
 add_library(shogod_core STATIC ${SHOGOD_CORE_SOURCES})
 target_include_directories(shogod_core PUBLIC src vendor)
 target_compile_options(shogod_core PUBLIC ${SHOGOD_WARNINGS})
 target_compile_definitions(shogod_core PUBLIC SHOGOD_EXPORTS NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(shogod_core PUBLIC shell32 ole32 windowscodecs)
+target_link_libraries(shogod_core PUBLIC shell32 ole32 windowscodecs winmm)
 
 # ---- ui + render (DX11/ImGui surface, menu, pages) --------------------------
 set(SHOGOD_UI_SOURCES

@@ -12,6 +12,7 @@
 #include "features/math/hitbox_geom.hpp"
 #include "features/math/hitchance.hpp"
 #include "features/rage/target.hpp"
+#include "sdk/cvar.hpp"
 #include "sdk/entities.hpp"
 #include "sdk/schema.hpp"
 #include "sdk/signatures.hpp"
@@ -19,6 +20,7 @@
 #include "sdk/usercmd.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -79,6 +81,23 @@ struct tick_input_latch {
     float pre_aa_left = 0.0f;
 };
 
+struct subtick_move_entry {
+    float when = 0.0f;
+    float analog_forward_delta = 0.0f;
+    float analog_left_delta = 0.0f;
+    float yaw_delta = 0.0f;
+};
+
+struct subtick_strafe_plan {
+    bool active = false;
+    int step_count = 0;
+    std::array<subtick_move_entry, 24> steps{};
+    float final_forwardmove = 0.0f;
+    float final_leftmove = 0.0f;
+    float lock_view_yaw = 0.0f;
+    math::vec3 simulated_velocity{};
+};
+
 struct createmove_state {
     int cycle_cursor = 0;
     shot_delay delay;
@@ -91,7 +110,14 @@ struct createmove_state {
     float last_strafe_tilt = 0.0f;
     bool has_last_strafe_output = false;
     autostrafe_output last_strafe_output{};
+    std::uint64_t strafe_key_held = 0;
+    std::uint64_t strafe_key_priority = 0;
+    int last_subtick_strafe_cmd = -1;
+    bool has_subtick_strafe_cache = false;
+    subtick_strafe_plan subtick_strafe_cache{};
     bool bhop_space_latched = false;
+    int bhop_jumped_cmd = -1;
+    float bhop_jumped_when = 0.0f;
     tick_input_latch tick_latch{};
     int auto_pistol_wait = 0;
     int last_auto_pistol_cmd = -1;
@@ -507,6 +533,213 @@ inline void reset_strafe_state(createmove_state& state) noexcept {
     state.last_strafe_tilt = 0.0f;
     state.has_last_strafe_output = false;
     state.last_strafe_output = {};
+    state.strafe_key_held = 0;
+    state.strafe_key_priority = 0;
+    state.last_subtick_strafe_cmd = -1;
+    state.has_subtick_strafe_cache = false;
+    state.subtick_strafe_cache = {};
+}
+
+struct subtick_strafe_input {
+    int command_number = 0;
+    float camera_yaw = 0.0f;
+    float move_ref_yaw = 0.0f;  // Steady yaw target (AA yaw or camera yaw — never oscillated)
+    math::vec3 velocity{};
+    std::uint64_t buttons = 0;
+    float prev_cmd_fwd = 0.0f;
+    float prev_cmd_left = 0.0f;
+    float max_speed = 250.0f;
+    float air_accel = 12.0f;
+    float air_max_wishspeed = 30.0f;
+    float gravity = 800.0f;
+    float surface_friction = 1.0f;
+    float stamina = 0.0f;
+    float stamina_recovery = 60.0f;
+    bool quantize_movement = true;
+    bool on_ground = false;
+    bool enable_bunnyhopping = false;
+    int available_slots = 16;
+};
+
+[[nodiscard]] inline float compute_next_jump_frac(
+    int last_actual_jump_press_tick, float last_actual_jump_press_frac,
+    int client_tick, float spam_penalty_sec) noexcept {
+    if (spam_penalty_sec <= 0.0f || last_actual_jump_press_tick <= 0) return 0.0f;
+    const float frac = static_cast<float>(last_actual_jump_press_tick - client_tick) +
+                       last_actual_jump_press_frac + spam_penalty_sec * 64.0f;
+    if (!std::isfinite(frac) || frac <= 0.0f) return 0.0f;
+    return std::max(0.0f, (std::floor(frac * 64.0f) + 1.0f) / 64.0f);
+}
+
+// Reverie-adapted subtick AirStrafer with three key stability fixes:
+// 1. Holds one consistent strafe side across all subticks in a command (no intra-tick zigzag).
+// 2. Keeps move_ref_yaw (base_cmd->viewangles->y) rock-solid with zero camera/third-person jitter.
+// 3. Caches per command_number so ~300 Hz sub-frame calls reproduce identically.
+[[nodiscard]] inline subtick_strafe_plan build_subtick_autostrafe_plan(
+    createmove_state& state, const subtick_strafe_input& in) noexcept {
+    if (state.last_subtick_strafe_cmd == in.command_number && state.has_subtick_strafe_cache) {
+        return state.subtick_strafe_cache;
+    }
+
+    subtick_strafe_plan out{};
+    const float ref_yaw =
+        std::isfinite(in.move_ref_yaw) ? math::normalize_yaw(in.move_ref_yaw) : 0.0f;
+    out.lock_view_yaw = ref_yaw;
+
+    if (!std::isfinite(in.camera_yaw) || !in.velocity.finite()) {
+        return out;
+    }
+
+    const int ticks = std::clamp(in.available_slots, 1, 20);
+    auto update_prio = [&](std::uint64_t btn, std::uint64_t opp) {
+        if ((in.buttons & btn) == 0) {
+            state.strafe_key_priority &= ~btn;
+        } else if ((state.strafe_key_held & btn) == 0 ||
+                   (state.strafe_key_priority & opp) == 0) {
+            state.strafe_key_priority = (state.strafe_key_priority & ~opp) | btn;
+        }
+    };
+    update_prio(sdk::k_in_moveleft, sdk::k_in_moveright);
+    update_prio(sdk::k_in_moveright, sdk::k_in_moveleft);
+    update_prio(sdk::k_in_forward, sdk::k_in_back);
+    update_prio(sdk::k_in_back, sdk::k_in_forward);
+    state.strafe_key_held = in.buttons;
+
+    float key_offset = 0.0f;
+    if ((state.strafe_key_priority & sdk::k_in_moveleft) != 0) key_offset = 90.0f;
+    else if ((state.strafe_key_priority & sdk::k_in_moveright) != 0) key_offset = -90.0f;
+    if ((state.strafe_key_priority & sdk::k_in_forward) != 0) key_offset *= 0.5f;
+    else if ((state.strafe_key_priority & sdk::k_in_back) != 0) {
+        key_offset = -key_offset * 0.5f + 180.0f;
+    }
+    const float target_yaw = math::normalize_yaw(in.camera_yaw + key_offset);
+
+    float move_speed = std::clamp(in.max_speed, 60.0f, 260.0f);
+    const float air_max_wishspeed = std::max(1.0f, in.air_max_wishspeed);
+    const float air_accel = std::max(0.0f, in.air_accel);
+    const float gravity = std::max(0.0f, in.gravity);
+    const float stamina_recovery = std::max(0.0f, in.stamina_recovery);
+
+    math::vec3 vel = in.velocity;
+    if (in.on_ground && !in.enable_bunnyhopping) {
+        const float limit = move_speed * 1.1f;
+        const float spd = vel.length();
+        if (limit > 0.0f && spd > limit) {
+            vel = vel * (limit / spd);
+        }
+    }
+
+    float surface_friction = std::clamp(in.surface_friction, 0.1f, 1.0f);
+    float stamina = std::clamp(in.stamina, 0.0f, 100.0f);
+    float last_fwd = std::clamp(in.prev_cmd_fwd, -1.0f, 1.0f);
+    float last_left = std::clamp(in.prev_cmd_left, -1.0f, 1.0f);
+    float last_yaw_delta = 0.0f;
+
+    constexpr float k_deg2rad = 3.14159265358979323846f / 180.0f;
+    constexpr float k_rad2deg = 180.0f / 3.14159265358979323846f;
+    const int tick_side = (state.strafe_pending_sign >= 0) ? 1 : -1;
+    bool toggled_straight_side = false;
+
+    for (int i = 0; i < ticks; ++i) {
+        const float when = static_cast<float>(i) / static_cast<float>(ticks);
+        const float next_when = static_cast<float>(i + 1) / static_cast<float>(ticks);
+        const float dt = std::max(1.0f / 4096.0f, (next_when - when) * (1.0f / 64.0f));
+        const float stamina_scale = std::clamp(1.0f - stamina / 100.0f, 0.0f, 1.0f);
+        const float wish_speed = move_speed * stamina_scale * stamina_scale;
+        const float max_wish = std::min(wish_speed, air_max_wishspeed);
+        const float accel_term = air_accel * wish_speed * surface_friction * dt;
+
+        const float speed = std::hypot(vel.x, vel.y);
+        const float vel_angle =
+            speed > 0.01f ? std::atan2(vel.y, vel.x) * k_rad2deg : target_yaw;
+        const float vel_delta = math::yaw_delta(vel_angle, target_yaw);
+        float wish_yaw = target_yaw;
+
+        if (speed > 0.1f) {
+            const float cos_angle = (max_wish - accel_term) / speed;
+            if (cos_angle < 1.0f) {
+                const float ideal_angle =
+                    std::acos(std::clamp(cos_angle, 0.0f, 1.0f)) * k_rad2deg;
+                if (std::fabs(vel_delta) < 0.1f) {
+                    wish_yaw = vel_angle + (tick_side > 0 ? ideal_angle : -ideal_angle);
+                    toggled_straight_side = true;
+                } else {
+                    wish_yaw = vel_angle + (vel_delta > 0.0f ? ideal_angle : -ideal_angle);
+                }
+            }
+        } else {
+            toggled_straight_side = true;
+        }
+        wish_yaw = math::normalize_yaw(wish_yaw);
+
+        const float wish_rad = wish_yaw * k_deg2rad;
+        const math::vec3 wish_dir{std::cos(wish_rad), std::sin(wish_rad), 0.0f};
+        const float proj = vel.x * wish_dir.x + vel.y * wish_dir.y;
+        const float add_speed = max_wish - proj;
+        if (add_speed > 0.0f) {
+            const float gain = std::min(accel_term, add_speed);
+            vel.x += wish_dir.x * gain;
+            vel.y += wish_dir.y * gain;
+        }
+
+        const float move_yaw = in.quantize_movement ? ref_yaw : wish_yaw;
+        const float yaw_delta_val =
+            in.quantize_movement ? math::yaw_delta(move_yaw, wish_yaw) : 0.0f;
+        const float rot = math::yaw_delta(move_yaw, ref_yaw) * k_deg2rad;
+        float fwd = std::clamp(std::cos(rot), -1.0f, 1.0f);
+        float left = std::clamp(-std::sin(rot), -1.0f, 1.0f);
+        if (std::fabs(fwd) < 0.001f) fwd = 0.0f;
+        if (std::fabs(left) < 0.001f) left = 0.0f;
+
+        subtick_move_entry& step = out.steps[static_cast<std::size_t>(out.step_count++)];
+        step.when = when;
+        step.analog_forward_delta = fwd - last_fwd;
+        step.analog_left_delta = left - last_left;
+        step.yaw_delta = yaw_delta_val - last_yaw_delta;
+
+        last_fwd = fwd;
+        last_left = left;
+        last_yaw_delta = yaw_delta_val;
+        vel.z -= gravity * dt;
+        surface_friction = (vel.z > 0.0f && vel.z <= 140.0f) ? 0.25f : 1.0f;
+        stamina = std::max(0.0f, stamina - stamina_recovery * dt);
+    }
+
+    if (toggled_straight_side) {
+        state.strafe_pending_sign = -tick_side;
+    } else if (std::hypot(vel.x, vel.y) > 0.1f) {
+        const float final_vel_angle = std::atan2(vel.y, vel.x) * k_rad2deg;
+        const float final_delta = math::yaw_delta(final_vel_angle, target_yaw);
+        if (std::fabs(final_delta) >= 0.1f) {
+            state.strafe_pending_sign = (final_delta > 0.0f) ? 1 : -1;
+        }
+    }
+
+    out.active = out.step_count > 0;
+    out.final_forwardmove = last_fwd;
+    out.final_leftmove = last_left;
+    out.simulated_velocity = vel;
+    state.last_subtick_strafe_cmd = in.command_number;
+    state.subtick_strafe_cache = out;
+    state.has_subtick_strafe_cache = true;
+    return out;
+}
+
+inline void strip_subtick_analog_moves(sdk::base_user_cmd_pb* base) noexcept {
+    if (!base || !base->subtick_moves.ss) return;
+    auto& field = base->subtick_moves;
+    if (field.current_size <= 0 || field.capacity <= 0 || field.ss->max <= 0) return;
+    const int n = std::min({field.current_size, field.capacity, field.ss->max});
+    int write = 0;
+    auto** elems = field.ss->elements;
+    for (int i = 0; i < n; ++i) {
+        auto* step = elems[i];
+        // Drop pure movement/yaw subtick slices while preserving button press/release steps.
+        if (!step || step->button == 0) continue;
+        if (write != i) std::swap(elems[write], elems[i]);
+        ++write;
+    }
+    field.current_size = write;
 }
 
 [[nodiscard]] inline int wrap_strafe_sector(int idx) noexcept {

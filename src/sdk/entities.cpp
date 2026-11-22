@@ -410,6 +410,7 @@ int weapon_group_from_def_index(int def_index) noexcept {
 
 void collect_frame(const anchors& a, const netvars& nv, frame_snapshot& out) noexcept {
     out.count = 0;
+    out.spectator_count = 0;
     out.local_index = 0;
     out.local_team = 0;
     out.local_pawn = 0;
@@ -596,12 +597,22 @@ void collect_frame(const anchors& a, const netvars& nv, frame_snapshot& out) noe
         if (nv.ctrl_player_name != 0) {
             safe_read_cstr(ctrl + nv.ctrl_player_name, p.name, sizeof p.name);
         }
+        if (nv.ctrl_ping != 0) {
+            safe_read(ctrl + nv.ctrl_ping, p.ping);
+        }
+        if (nv.ctrl_money_services != 0 && nv.money_account != 0) {
+            std::uintptr_t money_svc = 0;
+            if (safe_read(ctrl + nv.ctrl_money_services, money_svc) && money_svc != 0) {
+                safe_read(money_svc + nv.money_account, p.money);
+            }
+        }
 
         weapon_info w{};
         if (read_active_weapon(a.entity_system, nv, pawn, w)) {
             p.weapon_id = w.def_index;
             if (w.def_index > 0) p.weapon_family = weapon_group_from_def_index(w.def_index);
             p.ammo = w.clip;
+            p.reloading = w.in_reload;
             std::memcpy(p.weapon_name, w.name, sizeof p.weapon_name);
         }
 
@@ -642,6 +653,81 @@ void collect_frame(const anchors& a, const netvars& nv, frame_snapshot& out) noe
     }
     out.count = n;
     out.in_game = out.in_game || n > 0;
+
+    // Collect spectators currently watching our local pawn (or the pawn we're observing).
+    if (local_controller != 0 && nv.pawn_observer_services != 0 && nv.obs_target != 0) {
+        std::uintptr_t watched_pawn = out.local_pawn;
+        if (!out.local_alive && nv.ctrl_observer_pawn != 0) {
+            std::uint32_t local_obs_h = 0;
+            if (safe_read(local_controller + nv.ctrl_observer_pawn, local_obs_h)) {
+                const std::uintptr_t local_obs_pawn = resolve_handle(a.entity_system, local_obs_h);
+                if (local_obs_pawn != 0) {
+                    std::uintptr_t obs_svc = 0;
+                    std::uint32_t target_h = 0;
+                    if (safe_read(local_obs_pawn + nv.pawn_observer_services, obs_svc) &&
+                        obs_svc != 0 && safe_read(obs_svc + nv.obs_target, target_h)) {
+                        const std::uintptr_t target_pawn = resolve_handle(a.entity_system, target_h);
+                        if (target_pawn != 0) watched_pawn = target_pawn;
+                    }
+                }
+            }
+        }
+        if (watched_pawn != 0) {
+            int sc = 0;
+            for (int i = 1; i <= k_max_players && sc < k_max_spectators; ++i) {
+                const std::uintptr_t ctrl = entity_by_index(a.entity_system, i);
+                if (ctrl == 0 || ctrl == local_controller) continue;
+
+                std::uintptr_t obs_pawn = 0;
+                std::uint32_t h = 0;
+                if (safe_read(ctrl + nv.ctrl_player_pawn, h) && h != 0) {
+                    obs_pawn = resolve_handle(a.entity_system, h);
+                }
+                if (obs_pawn == 0 && nv.ctrl_observer_pawn != 0 &&
+                    safe_read(ctrl + nv.ctrl_observer_pawn, h) && h != 0) {
+                    obs_pawn = resolve_handle(a.entity_system, h);
+                }
+                if (obs_pawn == 0) continue;
+
+                int hp = 0;
+                std::uint8_t life = 2;
+                if (safe_read(obs_pawn + nv.ent_health, hp) &&
+                    safe_read(obs_pawn + nv.ent_life_state, life) && hp > 0 && life == 0) {
+                    // Skip living pawns unless their observer service is explicitly active.
+                    std::uint8_t mt = 0;
+                    if (nv.ent_actual_move_type == 0 ||
+                        !safe_read(obs_pawn + nv.ent_actual_move_type, mt) || mt != 8) {
+                        continue;
+                    }
+                }
+
+                std::uintptr_t obs_svc = 0;
+                if (!safe_read(obs_pawn + nv.pawn_observer_services, obs_svc) || obs_svc == 0) {
+                    continue;
+                }
+                std::uint32_t target_h = 0;
+                if (!safe_read(obs_svc + nv.obs_target, target_h)) continue;
+                const std::uintptr_t target_pawn = resolve_handle(a.entity_system, target_h);
+                if (target_pawn != watched_pawn) continue;
+
+                int mode = 0;
+                if (nv.obs_mode != 0) safe_read(obs_svc + nv.obs_mode, mode);
+                // Ignore mode 0 (none) / roam when not actively locking onto target.
+                if (mode != 2 && mode != 3) continue;
+
+                spectator_snapshot& sp = out.spectators[sc];
+                sp = {};
+                sp.mode = mode;
+                std::uint8_t team = 0;
+                if (safe_read(ctrl + nv.ent_team, team)) sp.team = team;
+                if (nv.ctrl_player_name != 0) {
+                    safe_read_cstr(ctrl + nv.ctrl_player_name, sp.name, sizeof sp.name);
+                }
+                if (sp.name[0] != '\0') ++sc;
+            }
+            out.spectator_count = sc;
+        }
+    }
 
     if (nv.id_designer_name != 0 && nv.c4_blow != 0) {
         static int cached_c4_index = -1;

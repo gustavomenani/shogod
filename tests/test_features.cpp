@@ -7,9 +7,11 @@
 #include "config/bind_state.hpp"
 
 #include "features/aaa/antiaim.hpp"
+#include "features/audio/hitsounds.hpp"
 #include "features/backtrack.hpp"
 #include "features/createmove.hpp"
 #include "features/esp/esp.hpp"
+#include "features/esp/esp_layout.hpp"
 #include "features/math/hitbox_geom.hpp"
 #include "features/math/hitchance.hpp"
 #include "features/rage/target.hpp"
@@ -2368,4 +2370,139 @@ TEST(createmove, runtime_air_strafe_eliminates_45deg_snaps_and_preserves_air_aa_
     const float final_vel_yaw = std::atan2(vel.y, vel.x) * (180.0f / 3.14159265f);
     EXPECT_LT(std::fabs(math::yaw_delta(cam_yaw, final_vel_yaw)), 6.0f);
     EXPECT_GE(std::hypot(vel.x, vel.y), 288.0f);
+}
+
+TEST(createmove, subtick_autostrafe_high_speed_zero_viewangle_jitter_and_idempotent) {
+    features::createmove_state st{};
+    math::vec3 vel{250.0f, 0.0f, 0.0f};
+    const float aa_yaw = -144.0f;  // backward + 36 deg auto_adjust
+
+    for (int t = 0; t < 32; ++t) {
+        features::subtick_strafe_input in{};
+        in.command_number = 900 + t;
+        in.camera_yaw = 0.0f;
+        in.move_ref_yaw = aa_yaw;
+        in.velocity = vel;
+        in.buttons = sdk::k_in_forward;
+        in.available_slots = 16;
+
+        const auto plan = features::build_subtick_autostrafe_plan(st, in);
+        ASSERT_TRUE(plan.active);
+        EXPECT_EQ(plan.step_count, 16);
+        // Zero third-person / AA viewangle jitter: view yaw remains strictly locked at aa_yaw!
+        EXPECT_FLOAT_EQ(plan.lock_view_yaw, aa_yaw);
+
+        // Sub-frame idempotency: repeated call on same command_number matches 1:1.
+        const auto dup = features::build_subtick_autostrafe_plan(st, in);
+        EXPECT_EQ(dup.step_count, plan.step_count);
+        EXPECT_FLOAT_EQ(dup.final_forwardmove, plan.final_forwardmove);
+        EXPECT_FLOAT_EQ(dup.final_leftmove, plan.final_leftmove);
+        EXPECT_FLOAT_EQ(dup.steps[0].yaw_delta, plan.steps[0].yaw_delta);
+
+        vel = plan.simulated_velocity;
+    }
+
+    // 16-subtick Reverie integration rapidly accelerates well past 350 u/s in 32 ticks.
+    EXPECT_GT(std::hypot(vel.x, vel.y), 350.0f);
+
+    // Next-jump fraction calculation respects sv_jump_spam_penalty_time cooldown.
+    EXPECT_FLOAT_EQ(features::compute_next_jump_frac(98, 0.5f, 100, 0.015625f), 0.0f);
+    EXPECT_NEAR(features::compute_next_jump_frac(99, 0.5f, 100, 0.015625f), 33.0f / 64.0f, 1e-4f);
+    EXPECT_GT(features::compute_next_jump_frac(100, 0.8f, 100, 0.015625f), 1.0f);
+    EXPECT_FLOAT_EQ(features::compute_next_jump_frac(0, 0.0f, 100, 0.015625f), 0.0f);
+
+    // strip_subtick_analog_moves removes analog steps while keeping jump button steps intact.
+    sdk::base_user_cmd_pb base{};
+    sdk::subtick_move_step_pb jump_rel{}, strafe_a{}, jump_prs{}, strafe_b{};
+    jump_rel.set_button(sdk::k_in_jump);
+    jump_rel.set_pressed(false);
+    jump_prs.set_button(sdk::k_in_jump);
+    jump_prs.set_pressed(true);
+    strafe_a.set_analog_forward_delta(1.0f);
+    strafe_b.set_yaw_delta(-45.0f);
+    struct tiny_rep {
+        int max;
+        sdk::subtick_move_step_pb* elements[4];
+    } st_buf{4, {&jump_rel, &strafe_a, &jump_prs, &strafe_b}};
+    base.subtick_moves.current_size = 4;
+    base.subtick_moves.capacity = 4;
+    base.subtick_moves.ss =
+        reinterpret_cast<sdk::repeated_ptr_field<sdk::subtick_move_step_pb>::rep_t*>(&st_buf);
+    features::strip_subtick_analog_moves(&base);
+    ASSERT_EQ(base.subtick_moves.current_size, 2);
+    EXPECT_EQ(base.subtick_moves.ss->elements[0]->button, sdk::k_in_jump);
+    EXPECT_EQ(base.subtick_moves.ss->elements[1]->button, sdk::k_in_jump);
+}
+
+TEST(audio, hitsound_selection_and_hitmarker_fade) {
+    config::hitsound_cfg cfg{};
+    cfg.enabled = true;
+    cfg.volume = 1.25f;
+    cfg.body_hit = 2;
+    cfg.body_kill = 3;
+    cfg.head_hit = 11;
+    cfg.head_kill = 14;
+
+    EXPECT_EQ(features::audio::select_hitsound(cfg, 2, 45).sound_index, 2);
+    EXPECT_EQ(features::audio::select_hitsound(cfg, 2, 0).sound_index, 3);
+    EXPECT_EQ(features::audio::select_hitsound(cfg, 1, 20).sound_index, 11);
+    EXPECT_EQ(features::audio::select_hitsound(cfg, 1, 0).sound_index, 14);
+    EXPECT_EQ(features::audio::select_hitsound(cfg, 1, 0).volume_pct, 125);
+
+    cfg.enabled = false;
+    EXPECT_EQ(features::audio::select_hitsound(cfg, 1, 0).sound_index, 0);
+
+    EXPECT_GE(features::audio::sound_count(), 19);
+    EXPECT_STREQ(features::audio::sound_names()[0], "Off");
+    EXPECT_NE(features::audio::vsnd_path_for_index(11), nullptr);
+    EXPECT_EQ(features::audio::vsnd_path_for_index(1), nullptr);
+
+    features::audio::reset_hitmarker();
+    bool hs = false;
+    EXPECT_FLOAT_EQ(features::audio::hitmarker_alpha(1000, hs), 0.0f);
+    config::hitsound_cfg muted{};
+    features::audio::record_hit_feedback(true, 1, 50, muted);
+    const std::uint64_t t = GetTickCount64();
+    EXPECT_GT(features::audio::hitmarker_alpha(t + 100, hs), 0.7f);
+    EXPECT_TRUE(hs);
+    EXPECT_FLOAT_EQ(features::audio::hitmarker_alpha(t + 600, hs), 0.0f);
+    features::audio::reset_hitmarker();
+}
+
+TEST(esp_layout, stacks_bars_and_flags_and_moves_via_ghost) {
+    using namespace features::esp;
+    std::vector<layout_item> items = {
+        {0, side_top, align_center, 0, {60.0f, 12.0f, false, 0.0f}, {}},
+        {1, side_left, align_start, 0, {4.0f, 120.0f, true, 0.0f}, {}},
+        {2, side_bottom, align_center, 0, {80.0f, 3.0f, true, 0.0f}, {}},
+        {3, side_bottom, align_center, 1, {48.0f, 12.0f, false, 0.0f}, {}},
+        {7, side_right, align_start, 0, {32.0f, 12.0f, false, 0.0f}, {}},
+    };
+    compute_layout(items, 100.0f, 50.0f, 180.0f, 210.0f, 4.0f, 2.0f, 1.0f);
+
+    // Name sits above top of box; HP bar sits left of box; Armor bar hugs bottom above weapon text.
+    EXPECT_LT(items[0].box.max_y, 50.0f);
+    EXPECT_LT(items[1].box.max_x, 100.0f);
+    EXPECT_FLOAT_EQ(items[1].box.min_y, 50.0f);
+    EXPECT_FLOAT_EQ(items[1].box.max_y, 210.0f);
+    EXPECT_LT(items[2].box.max_y, items[3].box.min_y);
+    EXPECT_GT(items[4].box.min_x, 180.0f);
+
+    // Quadrant side detection + ghost drag moves Name to Right side above existing flag.
+    EXPECT_EQ(compute_side(100.0f, 50.0f, 180.0f, 210.0f, 140.0f, 20.0f), side_top);
+    EXPECT_EQ(compute_side(100.0f, 50.0f, 180.0f, 210.0f, 210.0f, 120.0f), side_right);
+
+    int out_order = -1;
+    const auto dragged = build_layout_with_ghost(
+        items, 0, items[0].sz, side_right, 100.0f, 50.0f, 180.0f, 210.0f, 210.0f, 52.0f, out_order);
+    EXPECT_EQ(out_order, 0);
+    bool found_dragged = false;
+    for (const auto& it : dragged) {
+        if (it.id == 0) {
+            found_dragged = true;
+            EXPECT_EQ(it.side, side_right);
+            EXPECT_GT(it.box.min_x, 180.0f);
+        }
+    }
+    EXPECT_TRUE(found_dragged);
 }

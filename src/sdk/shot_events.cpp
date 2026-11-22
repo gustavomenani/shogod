@@ -1,9 +1,11 @@
 #include "sdk/shot_events.hpp"
 
 #include "engine/log.hpp"
+#include "features/audio/hitsounds.hpp"
 
 #include <atomic>
 #include <cstring>
+#include <mutex>
 #include <string_view>
 
 #include <windows.h>
@@ -46,15 +48,20 @@ constexpr event_key k_actor{event_hash("userid"), 0, "userid"};
 constexpr event_key k_attacker{event_hash("attacker"), 0, "attacker"};
 constexpr event_key k_health{event_hash("health"), 0, "health"};
 constexpr event_key k_damage{event_hash("dmg_health"), 0, "dmg_health"};
+constexpr event_key k_hitgroup{event_hash("hitgroup"), 0, "hitgroup"};
 
 std::atomic<std::uintptr_t> g_local_controller{0};
 std::atomic<std::uintptr_t> g_client_base{0};
 std::atomic<std::size_t> g_client_size{0};
+std::atomic<bool> g_hitmarker_enabled{true};
+std::mutex g_hs_cfg_mutex;
+config::hitsound_cfg g_hs_cfg{};
 
 struct observed_event {
     bool weapon_fire = false;
     int damage = -1;
     int remaining_health = -1;
+    int hitgroup = 0;
 };
 
 observed_event read_event(void* event) noexcept {
@@ -84,6 +91,7 @@ observed_event read_event(void* event) noexcept {
             const auto get_int = reinterpret_cast<int_fn>(table[7]);
             result.damage = get_int(event, k_damage, -1);
             result.remaining_health = get_int(event, k_health, -1);
+            result.hitgroup = get_int(event, k_hitgroup, 0);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return {};
@@ -99,8 +107,15 @@ public:
         if (observed.weapon_fire) {
             log::info("shot event: local weapon_fire");
         } else if (observed.damage > 0 && observed.remaining_health >= 0) {
-            log::info("shot event: local attacker player_hurt damage={} health={}",
-                      observed.damage, observed.remaining_health);
+            config::hitsound_cfg hs{};
+            {
+                std::lock_guard lock(g_hs_cfg_mutex);
+                hs = g_hs_cfg;
+            }
+            features::audio::record_hit_feedback(g_hitmarker_enabled.load(std::memory_order_relaxed),
+                                                 observed.hitgroup, observed.remaining_health, hs);
+            log::info("shot event: local attacker player_hurt damage={} health={} hitgroup={}",
+                      observed.damage, observed.remaining_health, observed.hitgroup);
         }
     }
     virtual int debug_id() { return id_; }
@@ -138,8 +153,15 @@ bool subscribe(void* manager, const char* event) noexcept {
 }  // namespace
 
 void update_shot_events(std::uintptr_t manager_cell, std::uintptr_t client_base,
-                        std::size_t client_size, std::uintptr_t local_controller) noexcept {
+                        std::size_t client_size, std::uintptr_t local_controller,
+                        bool hitmarker_enabled,
+                        const config::hitsound_cfg* hitsound_cfg) noexcept {
     g_local_controller.store(local_controller, std::memory_order_release);
+    g_hitmarker_enabled.store(hitmarker_enabled, std::memory_order_relaxed);
+    if (hitsound_cfg != nullptr) {
+        std::lock_guard lock(g_hs_cfg_mutex);
+        g_hs_cfg = *hitsound_cfg;
+    }
     if (manager_cell == 0 || client_base == 0 || client_size == 0 || local_controller == 0) return;
 
     static ULONGLONG next_check = 0;

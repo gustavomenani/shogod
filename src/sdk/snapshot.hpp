@@ -14,6 +14,13 @@ namespace shogod::sdk {
 
 inline constexpr int k_max_players = 64;
 inline constexpr int k_max_bones = 32;
+inline constexpr int k_max_spectators = 16;
+
+struct spectator_snapshot {
+    char name[32]{};
+    int team = 0;
+    int mode = 0;
+};
 
 struct player_snapshot {
     std::uintptr_t pawn = 0;
@@ -22,6 +29,8 @@ struct player_snapshot {
     int team = 0;
     int health = 0;
     int armor = 0;
+    int money = 0;
+    int ping = 0;
     bool alive = false;
     bool enemy = false;
     bool visible = false;
@@ -69,6 +78,8 @@ struct frame_snapshot {
     bool local_alive = false;
     math::mat4 view_matrix{};
     player_snapshot players[k_max_players]{};
+    spectator_snapshot spectators[k_max_spectators]{};
+    int spectator_count = 0;
 };
 
 // Writer: game thread. Fills a private copy, bumps the sequence, swaps.

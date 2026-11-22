@@ -387,3 +387,69 @@ TEST(config, default_json_anti_aim_schema_roundtrips_cleanly) {
     EXPECT_TRUE(aa2.on_air);
     EXPECT_TRUE(aa2.on_move);
 }
+
+TEST(config, esp_layout_hitsounds_hitmarker_and_spectator_list_roundtrip_and_clamp) {
+    store s;
+    auto& v = s.get().visuals;
+    v.flag_money = true;
+    v.flag_ping = true;
+    v.health_bar_glow = true;
+    v.armor_bar_glow = true;
+    v.health_bar_gradient = false;
+    v.name_color = {0.2f, 0.8f, 1.0f, 0.9f};
+    v.esp_layout[static_cast<std::size_t>(esp_elem_id::health_bar)] = {
+        static_cast<int>(esp_side::top), 2};
+    v.esp_layout[static_cast<std::size_t>(esp_elem_id::flag_money)] = {
+        static_cast<int>(esp_side::left), 4};
+
+    auto& m = s.get().misc;
+    m.info.spectator_list = false;
+    m.info.hitmarker = true;
+    m.info.hitmarker_color = {1.0f, 0.4f, 0.2f, 0.95f};
+    m.hitsound.enabled = true;
+    m.hitsound.volume = 1.65f;
+    m.hitsound.body_hit = 4;
+    m.hitsound.body_kill = 12;
+    m.hitsound.head_hit = 9;
+    m.hitsound.head_kill = 18;
+
+    store reloaded;
+    ASSERT_TRUE(reloaded.from_json(s.to_json()));
+    EXPECT_EQ(reloaded.clamps_applied(), 0);
+    EXPECT_TRUE(reloaded.get().visuals.flag_money);
+    EXPECT_TRUE(reloaded.get().visuals.flag_ping);
+    EXPECT_TRUE(reloaded.get().visuals.health_bar_glow);
+    EXPECT_TRUE(reloaded.get().visuals.armor_bar_glow);
+    EXPECT_FALSE(reloaded.get().visuals.health_bar_gradient);
+    EXPECT_FLOAT_EQ(reloaded.get().visuals.name_color.g, 0.8f);
+    EXPECT_EQ(reloaded.get().visuals.esp_layout[static_cast<std::size_t>(esp_elem_id::health_bar)].side,
+              static_cast<int>(esp_side::top));
+    EXPECT_EQ(reloaded.get().visuals.esp_layout[static_cast<std::size_t>(esp_elem_id::health_bar)].order, 2);
+    EXPECT_EQ(reloaded.get().visuals.esp_layout[static_cast<std::size_t>(esp_elem_id::flag_money)].side,
+              static_cast<int>(esp_side::left));
+    EXPECT_EQ(reloaded.get().visuals.esp_layout[static_cast<std::size_t>(esp_elem_id::flag_money)].order, 4);
+
+    EXPECT_FALSE(reloaded.get().misc.info.spectator_list);
+    EXPECT_TRUE(reloaded.get().misc.info.hitmarker);
+    EXPECT_FLOAT_EQ(reloaded.get().misc.info.hitmarker_color.g, 0.4f);
+    EXPECT_TRUE(reloaded.get().misc.hitsound.enabled);
+    EXPECT_FLOAT_EQ(reloaded.get().misc.hitsound.volume, 1.65f);
+    EXPECT_EQ(reloaded.get().misc.hitsound.body_hit, 4);
+    EXPECT_EQ(reloaded.get().misc.hitsound.body_kill, 12);
+    EXPECT_EQ(reloaded.get().misc.hitsound.head_hit, 9);
+    EXPECT_EQ(reloaded.get().misc.hitsound.head_kill, 18);
+
+    // Out-of-range hitsound & layout values clamp deterministically.
+    store clamped;
+    ASSERT_TRUE(clamped.from_json(R"({
+        "version": 1,
+        "visuals": {"esp_layout": [{"side": 99, "order": -5}]},
+        "misc": {"hitsound": {"enabled": true, "volume": 9.0, "body_hit": 99, "head_kill": -3}}
+    })"));
+    EXPECT_GT(clamped.clamps_applied(), 0);
+    EXPECT_EQ(clamped.get().visuals.esp_layout[0].side, 3);
+    EXPECT_EQ(clamped.get().visuals.esp_layout[0].order, 0);
+    EXPECT_FLOAT_EQ(clamped.get().misc.hitsound.volume, 2.0f);
+    EXPECT_EQ(clamped.get().misc.hitsound.body_hit, 18);
+    EXPECT_EQ(clamped.get().misc.hitsound.head_kill, 0);
+}

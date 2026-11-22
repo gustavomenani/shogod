@@ -185,6 +185,18 @@ void run_peek_assist(const config::config_v1&, const sdk::frame_snapshot& frame,
     sync_move_held_buttons(cmd, fmove, lmove);
 }
 
+bool safe_from_global_tick(std::uintptr_t fn_addr, int& out_tick, int global_tick,
+                           std::uint32_t world_group) noexcept {
+    if (fn_addr == 0) return false;
+    using fn_t = void (*)(int*, int, std::uint32_t);
+    __try {
+        reinterpret_cast<fn_t>(fn_addr)(&out_tick, global_tick, world_group);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 }  // namespace
 
 void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
@@ -202,6 +214,8 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         state.freestanding = {};
         reset_strafe_state(state);
         state.bhop_space_latched = false;
+        state.bhop_jumped_cmd = -1;
+        state.bhop_jumped_when = 0.0f;
         state.tick_latch = {};
         state.auto_pistol_wait = 0;
         state.auto_pistol_release = false;
@@ -309,7 +323,48 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         }
     }
 
-    // ---- Movement assists (camera space BEFORE Anti-Aim & movement fix) -----
+    // ---- Movement assists (Reverie-adapted subtick BunnyHop) ---------------
+    std::uintptr_t move_svc = 0;
+    if (nv.pawn_movement_services != 0) {
+        safe_read(frame.local_pawn + nv.pawn_movement_services, move_svc);
+    }
+
+    float next_jump_frac = 0.0f;
+    int last_landed_tick = -1;
+    float last_landed_frac = 0.0f;
+    if (move_svc != 0 && nv.move_modern_jump != 0 && anchors.from_global_tick != 0) {
+        int client_tick = frame.tick_valid ? frame.tick : 0;
+        if (nv.id_world_group != 0) {
+            std::uintptr_t identity = 0;
+            std::uint32_t world_group = 0;
+            if (nv.ent_identity != 0 && safe_read(frame.local_pawn + nv.ent_identity, identity) &&
+                identity != 0 && safe_read(identity + nv.id_world_group, world_group)) {
+                safe_from_global_tick(anchors.from_global_tick, client_tick, frame.tick,
+                                      world_group);
+            }
+        }
+        const std::uintptr_t mj = move_svc + static_cast<std::uintptr_t>(nv.move_modern_jump);
+        int press_tick = 0;
+        float press_frac = 0.0f;
+        float penalty_sec = 0.015625f;
+        sdk::read_cvar_float(anchors.cvar, "sv_jump_spam_penalty_time", penalty_sec);
+        if (nv.jump_last_press_tick != 0 && nv.jump_last_press_frac != 0 &&
+            safe_read(mj + nv.jump_last_press_tick, press_tick) &&
+            safe_read(mj + nv.jump_last_press_frac, press_frac)) {
+            next_jump_frac = compute_next_jump_frac(press_tick, press_frac, client_tick, penalty_sec);
+        }
+        if (nv.jump_last_landed_tick != 0 && nv.jump_last_landed_frac != 0) {
+            int ltick = -1;
+            float lfrac = 0.0f;
+            if (safe_read(mj + nv.jump_last_landed_tick, ltick) &&
+                safe_read(mj + nv.jump_last_landed_frac, lfrac) && ltick == client_tick &&
+                lfrac >= 0.0f && lfrac < 1.0f) {
+                last_landed_tick = ltick;
+                last_landed_frac = lfrac;
+            }
+        }
+    }
+
     const bool jump_held = state.tick_latch.jump_held;
     const bool valid_move_type = move_type != k_movetype_ladder &&
                                  move_type != k_movetype_noclip &&
@@ -319,16 +374,52 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         valid_move_type;
     bool bhop_do_jump = false;
     if (bhop_active) {
-        bhop_do_jump = step_bhop(state.bhop, cmd->command_number, on_ground, jump_held);
+        if (state.bhop_jumped_cmd == cmd->command_number) {
+            bhop_do_jump = true;
+        } else if (next_jump_frac < 1.0f) {
+            const bool landing_predicted =
+                on_ground || (last_landed_tick >= 0 && last_landed_frac >= 0.0f && last_landed_frac < 1.0f);
+            if (landing_predicted && jump_held) {
+                bhop_do_jump = step_bhop(state.bhop, cmd->command_number, true, true);
+                if (bhop_do_jump) {
+                    state.bhop_jumped_cmd = cmd->command_number;
+                    state.bhop_jumped_when =
+                        std::clamp(std::max(last_landed_frac, next_jump_frac), 0.0f, 0.96f);
+                }
+            } else {
+                bhop_do_jump = step_bhop(state.bhop, cmd->command_number, on_ground, jump_held);
+                if (bhop_do_jump) {
+                    state.bhop_jumped_cmd = cmd->command_number;
+                    state.bhop_jumped_when = std::clamp(next_jump_frac, 0.0f, 0.96f);
+                }
+            }
+        } else {
+            // Spam-penalty cooldown active this tick: notify state we did not jump on this tick.
+            (void)step_bhop(state.bhop, cmd->command_number, false, jump_held);
+            bhop_do_jump = false;
+        }
         if (jump_held) {
             strip_subtick_buttons(base_cmd, sdk::k_in_jump);
-            cmd->button_state.set_button_state(
-                sdk::k_in_jump,
-                bhop_do_jump ? sdk::in_button_state::up_down : sdk::in_button_state::up);
+            if (bhop_do_jump && state.bhop_jumped_cmd == cmd->command_number) {
+                // Reverie PressJump subtick edge pair so CS2's ProcessMovement triggers jump cleanly
+                // at exact landing/cooldown fraction without hitting sv_jump_spam_penalty_time.
+                if (auto* rel = sdk::add_subtick_move_step(anchors, cmd, state.bhop_jumped_when)) {
+                    rel->set_button(sdk::k_in_jump);
+                    rel->set_pressed(false);
+                }
+                if (auto* prs = sdk::add_subtick_move_step(anchors, cmd, state.bhop_jumped_when)) {
+                    prs->set_button(sdk::k_in_jump);
+                    prs->set_pressed(true);
+                }
+                cmd->button_state.set_button_state(sdk::k_in_jump, sdk::in_button_state::up_down);
+            } else {
+                cmd->button_state.set_button_state(sdk::k_in_jump, sdk::in_button_state::up);
+            }
         }
     } else {
         state.bhop = {};
         state.bhop_space_latched = false;
+        state.bhop_jumped_cmd = -1;
     }
     if (should_run_edge_jump(safe_mode, cfg.misc.movement.edge_jump, bhop_active, jump_held,
                              on_ground, speed_2d, move_type) &&
@@ -366,7 +457,7 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
 
     const bool want_autostrafe =
         !safe_mode && (active_binds & config::feature_bit(config::bound_feature::auto_strafe)) &&
-        !on_ground && valid_move_type;
+        (!on_ground || bhop_do_jump) && valid_move_type;
     const float strafe_f_wish = want_autostrafe ? wish_dir_f : 0.0f;
     const float strafe_l_wish = want_autostrafe ? wish_dir_l : 0.0f;
 
@@ -499,25 +590,118 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         state.freestanding = {};
     }
 
-    // Hysteresis-stabilized sector-matched AutoStrafe anchored to aa_angles.yaw (preserving auto_adjust & at_targets).
+    // Reverie-adapted Subtick Auto-Strafe: builds smooth continuous air acceleration across
+    // up to 16 subtick slices per tick while locking base_cmd->viewangles->y (ZERO jitter).
     bool strafe_applied = false;
     autostrafe_output strafe_out{};
     if (want_autostrafe) {
+        strip_subtick_analog_moves(base_cmd);
+        strip_subtick_buttons(base_cmd, k_move_button_mask);
+        zero_subtick_view_deltas(base_cmd);
+
         const float ref_yaw = aa_gate ? base_cmd->viewangles->y : camera_view.yaw;
-        strafe_out = compute_runtime_air_strafe(
-            state, cmd->command_number, camera_view.yaw, ref_yaw,
-            local_vel, strafe_f_wish, strafe_l_wish);
-        if (strafe_out.active) {
-            state.strafe_pending_sign = strafe_out.next_strafe_sign;
+        subtick_strafe_input sin{};
+        sin.command_number = cmd->command_number;
+        sin.camera_yaw = camera_view.yaw;
+        sin.move_ref_yaw = ref_yaw;
+        sin.velocity = local_vel;
+        sin.buttons = state.tick_latch.raw_held & k_move_button_mask;
+        sin.on_ground = on_ground;
+        sin.available_slots = std::clamp(32 - base_cmd->subtick_moves.current_size - 2, 1, 16);
+
+        float sv_maxspd = 260.0f;
+        float sv_airacc = 12.0f;
+        float sv_wish = 30.0f;
+        float sv_grav = 800.0f;
+        float sv_stam = 60.0f;
+        bool sv_quant = true;
+        bool sv_ebhop = false;
+        sdk::read_cvar_float(anchors.cvar, "sv_maxspeed", sv_maxspd);
+        sdk::read_cvar_float(anchors.cvar, "sv_airaccelerate", sv_airacc);
+        sdk::read_cvar_float(anchors.cvar, "sv_air_max_wishspeed", sv_wish);
+        sdk::read_cvar_float(anchors.cvar, "sv_gravity", sv_grav);
+        sdk::read_cvar_float(anchors.cvar, "sv_staminarecoveryrate", sv_stam);
+        sdk::read_cvar_bool(anchors.cvar, "sv_quantize_movement_input", sv_quant);
+        sdk::read_cvar_bool(anchors.cvar, "sv_enablebunnyhopping", sv_ebhop);
+
+        float grav_scale = 1.0f;
+        if (nv.ent_gravity_scale != 0) safe_read(frame.local_pawn + nv.ent_gravity_scale, grav_scale);
+        sin.gravity = sv_grav * (std::isfinite(grav_scale) && grav_scale > 0.0f ? grav_scale : 1.0f);
+        sin.air_accel = sv_airacc;
+        sin.air_max_wishspeed = sv_wish;
+        sin.stamina_recovery = sv_stam;
+        sin.quantize_movement = sv_quant;
+        sin.enable_bunnyhopping = sv_ebhop;
+
+        float max_spd = std::min(sv_maxspd, 260.0f);
+        if (move_svc != 0) {
+            float svc_max = 0.0f;
+            if (nv.move_maxspeed != 0 && safe_read(move_svc + nv.move_maxspeed, svc_max) && svc_max > 0.0f) {
+                max_spd = std::min(max_spd, svc_max);
+            }
+            if (nv.move_surface_friction != 0) {
+                float fric = 1.0f;
+                if (safe_read(move_svc + nv.move_surface_friction, fric) && std::isfinite(fric)) {
+                    sin.surface_friction = fric;
+                }
+            }
+            if (nv.move_stamina != 0) {
+                float stam = 0.0f;
+                if (safe_read(move_svc + nv.move_stamina, stam) && std::isfinite(stam)) {
+                    sin.stamina = stam;
+                }
+            }
+            std::uint64_t prev_btn = 0;
+            if (nv.move_buttons != 0) safe_read(move_svc + nv.move_buttons, prev_btn);
+            if ((prev_btn & (sdk::k_in_forward | sdk::k_in_back)) != 0 && nv.move_cmd_forward != 0) {
+                safe_read(move_svc + nv.move_cmd_forward, sin.prev_cmd_fwd);
+            }
+            if ((prev_btn & (sdk::k_in_moveleft | sdk::k_in_moveright)) != 0 && nv.move_cmd_left != 0) {
+                safe_read(move_svc + nv.move_cmd_left, sin.prev_cmd_left);
+            }
+        }
+        if ((local_flags & 2u /*FL_DUCKING*/) != 0 || (cmd->button_state.held & sdk::k_in_duck) != 0) {
+            max_spd *= 0.34f;
+        }
+        sin.max_speed = max_spd;
+
+        const subtick_strafe_plan plan = build_subtick_autostrafe_plan(state, sin);
+        if (plan.active) {
+            for (int si = 0; si < plan.step_count; ++si) {
+                const subtick_move_entry& e = plan.steps[static_cast<std::size_t>(si)];
+                auto* st = sdk::add_subtick_move_step(anchors, cmd, e.when);
+                if (!st) break;
+                st->set_analog_forward_delta(e.analog_forward_delta);
+                st->set_analog_left_delta(e.analog_left_delta);
+                if (std::fabs(e.yaw_delta) > 1e-4f) {
+                    st->set_yaw_delta(e.yaw_delta);
+                }
+            }
             const float strafe_pitch =
                 aa_gate ? base_cmd->viewangles->x : math::clamp_pitch(camera_view.pitch);
-            base_cmd->viewangles->set(strafe_pitch, strafe_out.steer_yaw, 0.0f);
-            zero_subtick_view_deltas(base_cmd);
-            strip_subtick_buttons(base_cmd, k_move_button_mask);
-            base_cmd->set_forwardmove(strafe_out.forwardmove);
-            base_cmd->set_leftmove(strafe_out.leftmove);
-            sync_move_held_buttons(cmd, strafe_out.forwardmove, strafe_out.leftmove);
+            base_cmd->viewangles->set(strafe_pitch, plan.lock_view_yaw, 0.0f);
+            base_cmd->set_forwardmove(plan.final_forwardmove);
+            base_cmd->set_leftmove(plan.final_leftmove);
+            sync_move_held_buttons(cmd, plan.final_forwardmove, plan.final_leftmove);
+            strafe_out.active = true;
+            strafe_out.forwardmove = plan.final_forwardmove;
+            strafe_out.leftmove = plan.final_leftmove;
+            strafe_out.steer_yaw = plan.lock_view_yaw;
             strafe_applied = true;
+        } else {
+            strafe_out = compute_runtime_air_strafe(
+                state, cmd->command_number, camera_view.yaw, ref_yaw,
+                local_vel, strafe_f_wish, strafe_l_wish);
+            if (strafe_out.active) {
+                state.strafe_pending_sign = strafe_out.next_strafe_sign;
+                const float strafe_pitch =
+                    aa_gate ? base_cmd->viewangles->x : math::clamp_pitch(camera_view.pitch);
+                base_cmd->viewangles->set(strafe_pitch, strafe_out.steer_yaw, 0.0f);
+                base_cmd->set_forwardmove(strafe_out.forwardmove);
+                base_cmd->set_leftmove(strafe_out.leftmove);
+                sync_move_held_buttons(cmd, strafe_out.forwardmove, strafe_out.leftmove);
+                strafe_applied = true;
+            }
         }
     } else {
         reset_strafe_state(state);
@@ -1313,6 +1497,7 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
                             base_cmd->set_leftmove(s_left);
                             sync_move_held_buttons(cmd, s_fwd, s_left);
                             strip_subtick_buttons(base_cmd, k_move_button_mask);
+                            strip_subtick_analog_moves(base_cmd);
                         } else if (!should_stop) {
                             float f_fwd = 0.0f;
                             float f_left = 0.0f;
@@ -1324,6 +1509,7 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
                             base_cmd->set_leftmove(f_left);
                             sync_move_held_buttons(cmd, f_fwd, f_left);
                             strip_subtick_buttons(base_cmd, k_move_button_mask);
+                            strip_subtick_analog_moves(base_cmd);
                         }
                     }
                     if (active_wep.is_revolver || (cmd->button_state.held & sdk::k_in_attack2) != 0) {
@@ -1388,6 +1574,7 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
                 base_cmd->set_leftmove(f_left);
                 sync_move_held_buttons(cmd, f_fwd, f_left);
                 strip_subtick_buttons(base_cmd, k_move_button_mask);
+                strip_subtick_analog_moves(base_cmd);
             }
         }
     }
@@ -1428,6 +1615,18 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
             log::info("rage: fired subtick cmd={} tick={} target={}", cmd->command_number,
                       tick_base, requested_target);
         }
+    }
+}
+
+bool safe_from_global_tick(std::uintptr_t fn_addr, int& out_tick, int global_tick,
+                           std::uint32_t world_group) noexcept {
+    if (fn_addr == 0) return false;
+    using fn_t = void (*)(int*, int, std::uint32_t);
+    __try {
+        reinterpret_cast<fn_t>(fn_addr)(&out_tick, global_tick, world_group);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
     }
 }
 

@@ -244,6 +244,30 @@ bool init_schema(std::uintptr_t schema_system, netvars& out) {
     lookup(scope, "C_PlantedC4", "m_bBombDefused", out.c4_defused, false);
     lookup(scope, "C_PlantedC4", "m_bBombTicking", out.c4_ticking, false);
 
+    lookup(scope, "C_BaseEntity", "m_flActualGravityScale", out.ent_gravity_scale, false);
+    lookup(scope, "CEntityIdentity", "m_worldGroupId", out.id_world_group, false);
+    lookup(scope, "CPlayer_MovementServices", "m_nButtons", out.move_buttons, false);
+    lookup(scope, "CPlayer_MovementServices", "m_flCmdForwardMove", out.move_cmd_forward, false);
+    lookup(scope, "CPlayer_MovementServices", "m_flCmdLeftMove", out.move_cmd_left, false);
+    lookup(scope, "CPlayer_MovementServices", "m_flMaxspeed", out.move_maxspeed, false);
+    lookup(scope, "CPlayer_MovementServices_Humanoid", "m_flSurfaceFriction", out.move_surface_friction, false);
+    lookup(scope, "CCSPlayer_MovementServices", "m_flStamina", out.move_stamina, false);
+    lookup(scope, "CCSPlayer_MovementServices", "m_ModernJump", out.move_modern_jump, false);
+    lookup(scope, "CCSPlayerModernJump", "m_nLastActualJumpPressTick", out.jump_last_press_tick, false);
+    lookup(scope, "CCSPlayerModernJump", "m_flLastActualJumpPressFrac", out.jump_last_press_frac, false);
+    lookup(scope, "CCSPlayerModernJump", "m_nLastLandedTick", out.jump_last_landed_tick, false);
+    lookup(scope, "CCSPlayerModernJump", "m_flLastLandedFrac", out.jump_last_landed_frac, false);
+    lookup(scope, "C_CSWeaponBase", "m_weaponMode", out.wep_mode, false);
+    lookup(scope, "CCSWeaponBaseVData", "m_flMaxSpeed", out.vdata_max_speed, false);
+
+    lookup(scope, "CCSPlayerController", "m_hObserverPawn", out.ctrl_observer_pawn, false);
+    lookup(scope, "CCSPlayerController", "m_pInGameMoneyServices", out.ctrl_money_services, false);
+    lookup(scope, "CCSPlayerController_InGameMoneyServices", "m_iAccount", out.money_account, false);
+    lookup(scope, "CCSPlayerController", "m_iPing", out.ctrl_ping, false);
+    lookup(scope, "C_BasePlayerPawn", "m_pObserverServices", out.pawn_observer_services, false);
+    lookup(scope, "CPlayer_ObserverServices", "m_hObserverTarget", out.obs_target, false);
+    lookup(scope, "CPlayer_ObserverServices", "m_iObserverMode", out.obs_mode, false);
+
     if (ok && (out.ent_health <= 0 || out.ent_health >= 0x4000)) {
         log::error("schema: m_iHealth offset {:#x} failed sanity range", out.ent_health);
         ok = false;

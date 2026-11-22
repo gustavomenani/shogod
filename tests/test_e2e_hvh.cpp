@@ -2922,3 +2922,64 @@ TEST(E2E_Tier4, T4_8_300HzBhopSubframePredictionAndAirStrafeContinuity) {
     EXPECT_EQ(dirty_move_toggle_bits, 0);
     EXPECT_GT(CS2PhysicsEngine::speed_2d(phys), 295.0f);
 }
+
+TEST(hvh_e2e, subtick_autostrafe_with_antiaim_locked_yaw_and_subframes) {
+    config::anti_aim_cfg aa{};
+    aa.enabled = true;
+    aa.base_pitch = config::pitch_mode::down;
+    aa.base_yaw = config::yaw_mode::fake_static;
+    aa.auto_adjust = true;
+    aa.on_air = true;
+    aa.on_move = true;
+
+    TickClock64_300 clock;
+    UserCmdHarness h;
+    features::createmove_state st{};
+    math::vec3 vel{250.0f, 0.0f, 0.0f};
+    float cam_yaw = 15.0f;
+    int aa_mismatch = 0;
+
+    clock.run_ticks(32, 4,
+        [&](int cmd, int tick, float /*curtime*/, int sf, int /*rf*/) {
+            if (st.tick_latch.command_number != cmd) {
+                st.tick_latch.command_number = cmd;
+                st.tick_latch.on_ground = false;
+                st.tick_latch.velocity = vel;
+            }
+            features::antiaim_context aa_ctx{};
+            aa_ctx.on_ground = false;
+            aa_ctx.has_move_input = true;
+            aa_ctx.speed_2d = std::hypot(vel.x, vel.y);
+            aa_ctx.command_number = cmd;
+            aa_ctx.weapon_group = static_cast<int>(config::weapon_group::rifle);
+            aa_ctx.weapon_type = 3;
+            const math::angles aa_ang = features::apply_antiaim_full(aa, {5.0f, cam_yaw}, aa_ctx);
+
+            h.begin_tick(cmd, tick, {5.0f, cam_yaw}, sdk::k_in_forward, 1.0f, 0.0f);
+            features::subtick_strafe_input sin{};
+            sin.command_number = cmd;
+            sin.camera_yaw = cam_yaw;
+            sin.move_ref_yaw = aa_ang.yaw;
+            sin.velocity = st.tick_latch.velocity;
+            sin.buttons = sdk::k_in_forward;
+            sin.available_slots = 16;
+
+            const auto plan = features::build_subtick_autostrafe_plan(st, sin);
+            EXPECT_TRUE(plan.active);
+            // Zero AA distortion across all sub-frames (0..3).
+            if (std::fabs(math::yaw_delta(aa_ang.yaw, plan.lock_view_yaw)) > 0.01f) {
+                ++aa_mismatch;
+            }
+            if (sf == 0) vel = plan.simulated_velocity;
+            h.base.viewangles->set(aa_ang.pitch, plan.lock_view_yaw, 0.0f);
+            h.base.set_forwardmove(plan.final_forwardmove);
+            h.base.set_leftmove(plan.final_leftmove);
+            features::sync_move_held_buttons(&h.cmd, plan.final_forwardmove, plan.final_leftmove);
+        },
+        [&](int /*cmd*/, int /*tick*/, float /*curtime*/) {
+            cam_yaw = math::normalize_yaw(cam_yaw + 0.5f);
+        });
+
+    EXPECT_EQ(aa_mismatch, 0);
+    EXPECT_GT(std::hypot(vel.x, vel.y), 350.0f);
+}

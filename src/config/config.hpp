@@ -155,6 +155,54 @@ struct cham_material {
     float fresnel_falloff = 2.0f;
 };
 
+enum class esp_side : int { top = 0, right = 1, bottom = 2, left = 3 };
+
+enum class esp_elem_id : int {
+    name = 0,
+    health_bar = 1,
+    armor_bar = 2,
+    weapon_icon = 3,
+    weapon_name = 4,
+    ammo = 5,
+    distance = 6,
+    flag_scoped = 7,
+    flag_defuse = 8,
+    flag_flash = 9,
+    flag_kit = 10,
+    flag_reload = 11,
+    flag_armor = 12,
+    flag_money = 13,
+    flag_ping = 14,
+    count = 15,
+};
+
+inline constexpr int k_esp_elem_count = static_cast<int>(esp_elem_id::count);
+
+struct esp_elem_slot {
+    int side = 0;   // 0=Top, 1=Right, 2=Bottom, 3=Left
+    int order = 0;
+};
+
+constexpr std::array<esp_elem_slot, k_esp_elem_count> default_esp_layout() noexcept {
+    return {{
+        {static_cast<int>(esp_side::top), 0},     // name
+        {static_cast<int>(esp_side::left), 0},    // health_bar
+        {static_cast<int>(esp_side::bottom), 0},  // armor_bar
+        {static_cast<int>(esp_side::bottom), 1},  // weapon_icon
+        {static_cast<int>(esp_side::bottom), 2},  // weapon_name
+        {static_cast<int>(esp_side::bottom), 3},  // ammo
+        {static_cast<int>(esp_side::bottom), 4},  // distance
+        {static_cast<int>(esp_side::right), 0},   // flag_scoped
+        {static_cast<int>(esp_side::right), 1},   // flag_defuse
+        {static_cast<int>(esp_side::right), 2},   // flag_flash
+        {static_cast<int>(esp_side::right), 3},   // flag_kit
+        {static_cast<int>(esp_side::right), 4},   // flag_reload
+        {static_cast<int>(esp_side::right), 5},   // flag_armor
+        {static_cast<int>(esp_side::right), 6},   // flag_money
+        {static_cast<int>(esp_side::right), 7},   // flag_ping
+    }};
+}
+
 struct visuals_cfg {
     bool enabled = true;
     keybind toggle{};
@@ -174,6 +222,31 @@ struct visuals_cfg {
     bool backtrack_ghost = true;
     bool visible_only = false;
     bool offscreen = true;
+
+    // Granular ESP flags & element styling (managed in interactive 3D Preview + synced to ESP)
+    bool flag_scoped = true;
+    bool flag_defuse = true;
+    bool flag_flash = true;
+    bool flag_kit = true;
+    bool flag_reload = true;
+    bool flag_armor = true;
+    bool flag_money = false;
+    bool flag_ping = false;
+
+    rgba name_color{0.95f, 0.96f, 0.98f, 1.0f};
+    rgba weapon_color{0.84f, 0.87f, 0.92f, 1.0f};
+    rgba weapon_icon_color{0.84f, 0.87f, 0.92f, 1.0f};
+    rgba ammo_color{0.84f, 0.87f, 0.92f, 1.0f};
+    rgba distance_color{0.69f, 0.73f, 0.78f, 1.0f};
+    rgba skeleton_color{0.94f, 0.96f, 1.0f, 0.85f};
+    rgba health_bar_color{0.25f, 0.88f, 0.35f, 1.0f};
+    rgba health_bar_grad_color{0.92f, 0.25f, 0.25f, 1.0f};
+    bool health_bar_gradient = true;
+    bool health_bar_glow = false;
+    rgba armor_bar_color{0.37f, 0.69f, 1.0f, 1.0f};
+    bool armor_bar_glow = false;
+
+    std::array<esp_elem_slot, k_esp_elem_count> esp_layout = default_esp_layout();
 
     cham_material player_chams{};
     cham_material team_chams{};
@@ -219,14 +292,27 @@ struct utilities_cfg {
     bool auto_pistol = false;
 };
 
+struct hitsound_cfg {
+    bool enabled = false;
+    float volume = 1.0f;  // 0.0 .. 2.0
+    int body_hit = 1;
+    int body_kill = 3;
+    int head_hit = 1;
+    int head_kill = 5;
+};
+
 struct info_cfg {
     bool watermark = true;
     bool keybind_list = true;
+    bool spectator_list = true;
+    bool hitmarker = true;
+    rgba hitmarker_color{1.0f, 1.0f, 1.0f, 1.0f};
 };
 
 struct misc_cfg {
     movement_cfg movement{};
     utilities_cfg utilities{};
+    hitsound_cfg hitsound{};
     info_cfg info{};
     bool block_server_detected = false;
 };

@@ -394,6 +394,10 @@ void read_cham(const json& obj, const char* key, cham_material& m, int& clamps) 
 }
 
 json visuals_to_json(const visuals_cfg& v) {
+    json layout_arr = json::array();
+    for (const auto& slot : v.esp_layout) {
+        layout_arr.push_back(json{{"side", slot.side}, {"order", slot.order}});
+    }
     return json{
         {"enabled", v.enabled},
         {"toggle", to_keybind(v.toggle)},
@@ -411,6 +415,27 @@ json visuals_to_json(const visuals_cfg& v) {
         {"backtrack_ghost", v.backtrack_ghost},
         {"visible_only", v.visible_only},
         {"offscreen", v.offscreen},
+        {"flag_scoped", v.flag_scoped},
+        {"flag_defuse", v.flag_defuse},
+        {"flag_flash", v.flag_flash},
+        {"flag_kit", v.flag_kit},
+        {"flag_reload", v.flag_reload},
+        {"flag_armor", v.flag_armor},
+        {"flag_money", v.flag_money},
+        {"flag_ping", v.flag_ping},
+        {"name_color", to_rgba(v.name_color)},
+        {"weapon_color", to_rgba(v.weapon_color)},
+        {"weapon_icon_color", to_rgba(v.weapon_icon_color)},
+        {"ammo_color", to_rgba(v.ammo_color)},
+        {"distance_color", to_rgba(v.distance_color)},
+        {"skeleton_color", to_rgba(v.skeleton_color)},
+        {"health_bar_color", to_rgba(v.health_bar_color)},
+        {"health_bar_grad_color", to_rgba(v.health_bar_grad_color)},
+        {"health_bar_gradient", v.health_bar_gradient},
+        {"health_bar_glow", v.health_bar_glow},
+        {"armor_bar_color", to_rgba(v.armor_bar_color)},
+        {"armor_bar_glow", v.armor_bar_glow},
+        {"esp_layout", std::move(layout_arr)},
         {"no_flash", v.no_flash},
         {"no_smoke", v.no_smoke},
         {"no_scope", v.no_scope},
@@ -448,7 +473,7 @@ void read_visuals(const json& obj, visuals_cfg& v, int& clamps) {
     v.armor_bar = get_or<bool>(obj, "armor_bar", v.armor_bar);
     v.name = get_or<bool>(obj, "name", v.name);
     v.weapon = get_or<bool>(obj, "weapon", v.weapon);
-    v.weapon_icon = get_or<bool>(obj, "weapon_icon", v.weapon);
+    v.weapon_icon = get_or<bool>(obj, "weapon_icon", v.weapon_icon);
     v.ammo = get_or<bool>(obj, "ammo", v.ammo);
     v.flags = get_or<bool>(obj, "flags", v.flags);
     v.distance = get_or<bool>(obj, "distance", v.distance);
@@ -456,6 +481,39 @@ void read_visuals(const json& obj, visuals_cfg& v, int& clamps) {
     v.backtrack_ghost = get_or<bool>(obj, "backtrack_ghost", v.backtrack_ghost);
     v.visible_only = get_or<bool>(obj, "visible_only", v.visible_only);
     v.offscreen = get_or<bool>(obj, "offscreen", v.offscreen);
+    v.flag_scoped = get_or<bool>(obj, "flag_scoped", v.flag_scoped);
+    v.flag_defuse = get_or<bool>(obj, "flag_defuse", v.flag_defuse);
+    v.flag_flash = get_or<bool>(obj, "flag_flash", v.flag_flash);
+    v.flag_kit = get_or<bool>(obj, "flag_kit", v.flag_kit);
+    v.flag_reload = get_or<bool>(obj, "flag_reload", v.flag_reload);
+    v.flag_armor = get_or<bool>(obj, "flag_armor", v.flag_armor);
+    v.flag_money = get_or<bool>(obj, "flag_money", v.flag_money);
+    v.flag_ping = get_or<bool>(obj, "flag_ping", v.flag_ping);
+    v.name_color = get_rgba(obj, "name_color", v.name_color);
+    v.weapon_color = get_rgba(obj, "weapon_color", v.weapon_color);
+    v.weapon_icon_color = get_rgba(obj, "weapon_icon_color", v.weapon_icon_color);
+    v.ammo_color = get_rgba(obj, "ammo_color", v.ammo_color);
+    v.distance_color = get_rgba(obj, "distance_color", v.distance_color);
+    v.skeleton_color = get_rgba(obj, "skeleton_color", v.skeleton_color);
+    v.health_bar_color = get_rgba(obj, "health_bar_color", v.health_bar_color);
+    v.health_bar_grad_color = get_rgba(obj, "health_bar_grad_color", v.health_bar_grad_color);
+    v.health_bar_gradient = get_or<bool>(obj, "health_bar_gradient", v.health_bar_gradient);
+    v.health_bar_glow = get_or<bool>(obj, "health_bar_glow", v.health_bar_glow);
+    v.armor_bar_color = get_rgba(obj, "armor_bar_color", v.armor_bar_color);
+    v.armor_bar_glow = get_or<bool>(obj, "armor_bar_glow", v.armor_bar_glow);
+    if (obj.contains("esp_layout") && obj["esp_layout"].is_array()) {
+        const auto& arr = obj["esp_layout"];
+        const std::size_t n = std::min(arr.size(), v.esp_layout.size());
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!arr[i].is_object()) continue;
+            v.esp_layout[i].side = clampi("visuals.esp_layout.side",
+                                          get_or<int>(arr[i], "side", v.esp_layout[i].side),
+                                          0, 3, clamps);
+            v.esp_layout[i].order = clampi("visuals.esp_layout.order",
+                                           get_or<int>(arr[i], "order", v.esp_layout[i].order),
+                                           0, k_esp_elem_count * 2, clamps);
+        }
+    }
     v.no_flash = get_or<bool>(obj, "no_flash", v.no_flash);
     v.no_smoke = get_or<bool>(obj, "no_smoke", v.no_smoke);
     v.no_scope = get_or<bool>(obj, "no_scope", v.no_scope);
@@ -535,6 +593,15 @@ void clamp_all_impl(config_v1& cfg, int& clamps) {
         cfg.visuals.camera_fov = 50;
         ++clamps;
     }
+    for (auto& slot : cfg.visuals.esp_layout) {
+        slot.side = clampi("visuals.esp_layout.side", slot.side, 0, 3, clamps);
+        slot.order = clampi("visuals.esp_layout.order", slot.order, 0, k_esp_elem_count * 2, clamps);
+    }
+    cfg.misc.hitsound.volume = clampf("misc.hitsound.volume", cfg.misc.hitsound.volume, 0.0f, 2.0f, clamps);
+    cfg.misc.hitsound.body_hit = clampi("misc.hitsound.body_hit", cfg.misc.hitsound.body_hit, 0, 18, clamps);
+    cfg.misc.hitsound.body_kill = clampi("misc.hitsound.body_kill", cfg.misc.hitsound.body_kill, 0, 18, clamps);
+    cfg.misc.hitsound.head_hit = clampi("misc.hitsound.head_hit", cfg.misc.hitsound.head_hit, 0, 18, clamps);
+    cfg.misc.hitsound.head_kill = clampi("misc.hitsound.head_kill", cfg.misc.hitsound.head_kill, 0, 18, clamps);
     cfg.ui.opacity = clampf("ui.opacity", cfg.ui.opacity, 0.2f, 1.0f, clamps);
 }
 
@@ -616,11 +683,25 @@ bool store::from_json(std::string_view text) {
             cfg_.misc.utilities.auto_pistol =
                 get_or<bool>(u, "auto_pistol", cfg_.misc.utilities.auto_pistol);
         }
+        if (m.contains("hitsound") && m["hitsound"].is_object()) {
+            const json& hs = m["hitsound"];
+            cfg_.misc.hitsound.enabled = get_or<bool>(hs, "enabled", cfg_.misc.hitsound.enabled);
+            cfg_.misc.hitsound.volume = get_or<float>(hs, "volume", cfg_.misc.hitsound.volume);
+            cfg_.misc.hitsound.body_hit = get_or<int>(hs, "body_hit", cfg_.misc.hitsound.body_hit);
+            cfg_.misc.hitsound.body_kill = get_or<int>(hs, "body_kill", cfg_.misc.hitsound.body_kill);
+            cfg_.misc.hitsound.head_hit = get_or<int>(hs, "head_hit", cfg_.misc.hitsound.head_hit);
+            cfg_.misc.hitsound.head_kill = get_or<int>(hs, "head_kill", cfg_.misc.hitsound.head_kill);
+        }
         if (m.contains("info") && m["info"].is_object()) {
             const json& inf = m["info"];
             cfg_.misc.info.watermark = get_or<bool>(inf, "watermark", cfg_.misc.info.watermark);
             cfg_.misc.info.keybind_list =
                 get_or<bool>(inf, "keybind_list", cfg_.misc.info.keybind_list);
+            cfg_.misc.info.spectator_list =
+                get_or<bool>(inf, "spectator_list", cfg_.misc.info.spectator_list);
+            cfg_.misc.info.hitmarker = get_or<bool>(inf, "hitmarker", cfg_.misc.info.hitmarker);
+            cfg_.misc.info.hitmarker_color =
+                get_rgba(inf, "hitmarker_color", cfg_.misc.info.hitmarker_color);
         }
         cfg_.misc.block_server_detected =
             get_or<bool>(m, "block_server_detected", cfg_.misc.block_server_detected);
@@ -672,8 +753,17 @@ std::string store::to_json() const {
                           {"peek_assist_bind", to_keybind(cfg_.misc.movement.peek_assist_bind)},
                           {"leg_movement", cfg_.misc.movement.leg_movement}}},
         {"utilities", json{{"auto_pistol", cfg_.misc.utilities.auto_pistol}}},
+        {"hitsound", json{{"enabled", cfg_.misc.hitsound.enabled},
+                          {"volume", cfg_.misc.hitsound.volume},
+                          {"body_hit", cfg_.misc.hitsound.body_hit},
+                          {"body_kill", cfg_.misc.hitsound.body_kill},
+                          {"head_hit", cfg_.misc.hitsound.head_hit},
+                          {"head_kill", cfg_.misc.hitsound.head_kill}}},
         {"info", json{{"watermark", cfg_.misc.info.watermark},
-                      {"keybind_list", cfg_.misc.info.keybind_list}}},
+                      {"keybind_list", cfg_.misc.info.keybind_list},
+                      {"spectator_list", cfg_.misc.info.spectator_list},
+                      {"hitmarker", cfg_.misc.info.hitmarker},
+                      {"hitmarker_color", to_rgba(cfg_.misc.info.hitmarker_color)}}},
         {"block_server_detected", cfg_.misc.block_server_detected},
     };
     doc["ui"] = json{

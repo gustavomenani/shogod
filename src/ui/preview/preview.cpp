@@ -1,6 +1,7 @@
 #include "ui/preview/preview.hpp"
 
 #include "engine/log.hpp"
+#include "features/esp/esp_layout.hpp"
 #include "features/math/mat4.hpp"
 #include "sdk/bones.hpp"
 #include "ui/cs2_weapon_icons.hpp"
@@ -401,9 +402,44 @@ ImU32 to_imu32(const config::rgba& c, int a = 255) {
                     static_cast<int>(std::clamp(c.b, 0.0f, 1.0f) * 255.0f), a);
 }
 
-void draw_esp_overlay(ImDrawList* dl, const config::visuals_cfg& v, const math::mat4& view_proj,
-                      const ImVec2& vp_pos, const ImVec2& vp_size, const math::vec3& bmin,
-                      const math::vec3& bmax, const math::vec3& head_pos, const char* label_name) {
+// Special non-layout IDs for right-click settings popup (skeleton / box).
+inline constexpr int k_popup_box = 100;
+inline constexpr int k_popup_skeleton = 101;
+
+struct preview_ui_state {
+    bool drawer_open = false;
+    float drawer_anim = 0.0f;
+    int hovered_id = -1;
+    int dragging_id = -1;
+    int drag_target_side = 0;
+    int drag_target_order = 0;
+    int popup_id = -1;
+    bool open_popup_req = false;
+    bool box_drawn = false;
+    ImVec2 last_box_min{};
+    ImVec2 last_box_max{};
+};
+
+preview_ui_state g_pv{};
+
+void draw_preview_bar_glow(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col) {
+    const int r = (col >> IM_COL32_R_SHIFT) & 0xFF;
+    const int g = (col >> IM_COL32_G_SHIFT) & 0xFF;
+    const int bl = (col >> IM_COL32_B_SHIFT) & 0xFF;
+    const int al = (col >> IM_COL32_A_SHIFT) & 0xFF;
+    for (int s = 1; s <= 3; ++s) {
+        const float pad = static_cast<float>(s) * 1.4f;
+        const int ga = (al * (4 - s)) / 14;
+        dl->AddRectFilled(ImVec2(a.x - pad, a.y - pad), ImVec2(b.x + pad, b.y + pad),
+                          IM_COL32(r, g, bl, ga), 1.5f);
+    }
+}
+
+void draw_esp_overlay(ImDrawList* dl, const config::visuals_cfg& v, config::visuals_cfg* edit,
+                      const math::mat4& view_proj, const ImVec2& vp_pos, const ImVec2& vp_size,
+                      const math::vec3& bmin, const math::vec3& bmax, const char* label_name,
+                      bool block_interaction) {
+    g_pv.box_drawn = false;
     const math::vec3 corners[8] = {
         {bmin.x, bmin.y, bmin.z}, {bmax.x, bmin.y, bmin.z},
         {bmax.x, bmax.y, bmin.z}, {bmin.x, bmax.y, bmin.z},
@@ -425,6 +461,10 @@ void draw_esp_overlay(ImDrawList* dl, const config::visuals_cfg& v, const math::
         bottom = std::max(bottom, scr[i].y);
     }
     if (valid_pts < 4 || right - left < 6.0f || bottom - top < 10.0f) return;
+
+    g_pv.box_drawn = true;
+    g_pv.last_box_min = ImVec2(left, top);
+    g_pv.last_box_max = ImVec2(right, bottom);
 
     const int alpha = std::clamp(v.esp_alpha, 0, 255);
     const ImU32 box_col = to_imu32(v.box_color, alpha);
@@ -457,56 +497,468 @@ void draw_esp_overlay(ImDrawList* dl, const config::visuals_cfg& v, const math::
         }
     }
 
-    if (v.health_bar) {
-        const float bx = left - 7.0f;
-        const float hp_frac = 0.88f;
-        const float fill_h = h * hp_frac;
-        dl->AddRectFilled(ImVec2(bx - 1, top - 1), ImVec2(bx + 4, bottom + 1), outline);
-        dl->AddRectFilled(ImVec2(bx, bottom - fill_h), ImVec2(bx + 3, bottom),
-                          IM_COL32(120, 235, 95, alpha));
+    // Build Reverie-style shared layout list around the 3D SAS box.
+    std::vector<features::esp::layout_item> items;
+    items.reserve(config::k_esp_elem_count);
+    auto slot_for = [&](config::esp_elem_id eid) -> const config::esp_elem_slot& {
+        return v.esp_layout[static_cast<std::size_t>(eid)];
+    };
+    auto add_item = [&](config::esp_elem_id eid, float bw, float bh, bool full_span) {
+        const auto& s = slot_for(eid);
+        features::esp::layout_item it{};
+        it.id = static_cast<int>(eid);
+        it.side = std::clamp(s.side, 0, 3);
+        it.order = s.order;
+        it.sz = {bw, bh, full_span, 0.0f};
+        items.push_back(it);
+    };
+    auto measure_bar_for_side = [&](config::esp_elem_id eid, float thick) {
+        int s = slot_for(eid).side;
+        if (g_pv.dragging_id == static_cast<int>(eid)) s = g_pv.drag_target_side;
+        const bool horiz = features::esp::is_horizontal_side(s);
+        add_item(eid, horiz ? w : thick, horiz ? thick : h, true);
+    };
+
+    if (v.health_bar) measure_bar_for_side(config::esp_elem_id::health_bar, 4.0f);
+    if (v.armor_bar) measure_bar_for_side(config::esp_elem_id::armor_bar, 3.0f);
+    const char* disp_name = (label_name && label_name[0] != '\0') ? label_name : "SAS";
+    if (v.name) {
+        const ImVec2 tsz = ImGui::CalcTextSize(disp_name);
+        add_item(config::esp_elem_id::name, tsz.x, tsz.y, false);
     }
-    if (v.armor_bar) {
-        const float ay = bottom + 3.0f;
-        dl->AddRectFilled(ImVec2(left - 1, ay - 1), ImVec2(right + 1, ay + 3), outline);
-        dl->AddRectFilled(ImVec2(left, ay), ImVec2(left + w * 0.92f, ay + 2),
-                          IM_COL32(95, 175, 255, alpha));
-    }
-    if (v.name && label_name && label_name[0] != '\0') {
-        ImVec2 head_s{};
-        const float nx = project(head_pos, view_proj, vp_pos, vp_size, head_s)
-                             ? head_s.x
-                             : (left + w * 0.5f);
-        const ImVec2 tsz = ImGui::CalcTextSize(label_name);
-        dl->AddText(ImVec2(nx - tsz.x * 0.5f, top - tsz.y - 3.0f),
-                    IM_COL32(242, 245, 252, alpha), label_name);
-    }
-    float by = bottom + (v.armor_bar ? 7.0f : 4.0f);
-    if (v.weapon_icon) {
-        draw_cs2_weapon_icon(*dl, ImVec2(left + w * 0.5f, by + 6.5f), 36.0f, 12.0f,
-                             static_cast<int>(cs2_weapon_icon::m4a1_silencer),
-                             IM_COL32(215, 222, 235, alpha));
-        by += 15.0f;
-    }
+    if (v.weapon_icon) add_item(config::esp_elem_id::weapon_icon, 36.0f, 13.0f, false);
     if (v.weapon) {
-        const char* wname = "M4A1-S";
-        const ImVec2 tsz = ImGui::CalcTextSize(wname);
-        dl->AddText(ImVec2(left + (w - tsz.x) * 0.5f, by), IM_COL32(215, 222, 235, alpha), wname);
-        by += ImGui::GetTextLineHeight();
+        const ImVec2 tsz = ImGui::CalcTextSize("M4A1-S");
+        add_item(config::esp_elem_id::weapon_name, tsz.x, tsz.y, false);
     }
     if (v.ammo) {
-        const char* am = "[20]";
-        const ImVec2 tsz = ImGui::CalcTextSize(am);
-        dl->AddText(ImVec2(left + (w - tsz.x) * 0.5f, by), IM_COL32(215, 222, 235, alpha), am);
-        by += ImGui::GetTextLineHeight();
+        const ImVec2 tsz = ImGui::CalcTextSize("[20]");
+        add_item(config::esp_elem_id::ammo, tsz.x, tsz.y, false);
     }
     if (v.distance) {
-        const char* dm = "6m";
-        const ImVec2 tsz = ImGui::CalcTextSize(dm);
-        dl->AddText(ImVec2(left + (w - tsz.x) * 0.5f, by), IM_COL32(175, 185, 200, alpha), dm);
+        const ImVec2 tsz = ImGui::CalcTextSize("6m");
+        add_item(config::esp_elem_id::distance, tsz.x, tsz.y, false);
     }
     if (v.flags) {
-        dl->AddText(ImVec2(right + 4.0f, top), IM_COL32(160, 235, 160, alpha), "KIT");
+        auto add_flag = [&](config::esp_elem_id fid, const char* txt) {
+            const ImVec2 tsz = ImGui::CalcTextSize(txt);
+            add_item(fid, tsz.x, tsz.y, false);
+        };
+        if (v.flag_scoped) add_flag(config::esp_elem_id::flag_scoped, "ZOOM");
+        if (v.flag_defuse) add_flag(config::esp_elem_id::flag_defuse, "DEFUSE");
+        if (v.flag_flash) add_flag(config::esp_elem_id::flag_flash, "FLASH");
+        if (v.flag_kit) add_flag(config::esp_elem_id::flag_kit, "KIT");
+        if (v.flag_reload) add_flag(config::esp_elem_id::flag_reload, "RELOAD");
+        if (v.flag_armor) add_flag(config::esp_elem_id::flag_armor, "HK");
+        if (v.flag_money) add_flag(config::esp_elem_id::flag_money, "$4200");
+        if (v.flag_ping) add_flag(config::esp_elem_id::flag_ping, "18ms");
     }
+
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    std::vector<features::esp::layout_item> draw_items = items;
+
+    if (edit != nullptr && g_pv.dragging_id >= 0 && !block_interaction) {
+        const int new_side = features::esp::compute_side(left, top, right, bottom, mouse.x, mouse.y);
+        g_pv.drag_target_side = new_side;
+        features::esp::layout_dims drag_dims{};
+        for (const auto& it : items) {
+            if (it.id == g_pv.dragging_id) {
+                drag_dims = it.sz;
+                break;
+            }
+        }
+        int out_order = 0;
+        draw_items = features::esp::build_layout_with_ghost(
+            items, g_pv.dragging_id, drag_dims, new_side, left, top, right, bottom, mouse.x,
+            mouse.y, out_order);
+        g_pv.drag_target_order = out_order;
+
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            for (const auto& it : draw_items) {
+                if (it.id >= 0 && it.id < config::k_esp_elem_count) {
+                    edit->esp_layout[static_cast<std::size_t>(it.id)] = {it.side, it.order};
+                }
+            }
+            g_pv.dragging_id = -1;
+        }
+    } else {
+        features::esp::compute_layout(draw_items, left, top, right, bottom, 4.0f, 3.0f, 1.0f);
+    }
+
+    const ImU32 accent = colors().accent;
+    g_pv.hovered_id = -1;
+
+    for (const auto& it : draw_items) {
+        const float x0 = it.box.min_x;
+        const float y0 = it.box.min_y;
+        const float x1 = it.box.max_x;
+        const float y1 = it.box.max_y;
+        const float cx = (x0 + x1) * 0.5f;
+        const bool horiz = features::esp::is_horizontal_side(it.side);
+
+        if (edit != nullptr && !block_interaction && g_pv.dragging_id < 0) {
+            if (mouse.x >= x0 - 4.0f && mouse.x <= x1 + 4.0f &&
+                mouse.y >= y0 - 3.0f && mouse.y <= y1 + 3.0f) {
+                g_pv.hovered_id = it.id;
+            }
+        }
+
+        const bool is_ghost = (g_pv.dragging_id == it.id);
+        const bool is_hov = (g_pv.hovered_id == it.id);
+
+        if (is_ghost) {
+            dl->AddRectFilled(ImVec2(x0 - 3, y0 - 2), ImVec2(x1 + 3, y1 + 2),
+                              IM_COL32(75, 165, 255, 45), 3.0f);
+            dl->AddRect(ImVec2(x0 - 3, y0 - 2), ImVec2(x1 + 3, y1 + 2), accent, 3.0f, 0, 1.3f);
+        } else if (is_hov) {
+            dl->AddRect(ImVec2(x0 - 3, y0 - 2), ImVec2(x1 + 3, y1 + 2),
+                        IM_COL32(255, 255, 255, 140), 3.0f);
+        }
+
+        switch (static_cast<config::esp_elem_id>(it.id)) {
+            case config::esp_elem_id::health_bar: {
+                const float hp_frac = 0.88f;
+                const ImU32 hp_top = v.health_bar_gradient ? to_imu32(v.health_bar_grad_color, alpha)
+                                                           : to_imu32(v.health_bar_color, alpha);
+                const ImU32 hp_bot = to_imu32(v.health_bar_color, alpha);
+                if (v.health_bar_glow) draw_preview_bar_glow(dl, ImVec2(x0, y0), ImVec2(x1, y1), hp_bot);
+                dl->AddRectFilled(ImVec2(x0 - 1, y0 - 1), ImVec2(x1 + 1, y1 + 1), outline);
+                if (horiz) {
+                    dl->AddRectFilledMultiColor(ImVec2(x0, y0), ImVec2(x0 + (x1 - x0) * hp_frac, y1),
+                                                hp_top, hp_bot, hp_bot, hp_top);
+                } else {
+                    dl->AddRectFilledMultiColor(ImVec2(x0, y1 - (y1 - y0) * hp_frac), ImVec2(x1, y1),
+                                                hp_top, hp_top, hp_bot, hp_bot);
+                }
+                break;
+            }
+            case config::esp_elem_id::armor_bar: {
+                const float ar_frac = 0.92f;
+                const ImU32 ar_col = to_imu32(v.armor_bar_color, alpha);
+                if (v.armor_bar_glow) draw_preview_bar_glow(dl, ImVec2(x0, y0), ImVec2(x1, y1), ar_col);
+                dl->AddRectFilled(ImVec2(x0 - 1, y0 - 1), ImVec2(x1 + 1, y1 + 1), outline);
+                if (horiz) {
+                    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + (x1 - x0) * ar_frac, y1), ar_col);
+                } else {
+                    dl->AddRectFilled(ImVec2(x0, y1 - (y1 - y0) * ar_frac), ImVec2(x1, y1), ar_col);
+                }
+                break;
+            }
+            case config::esp_elem_id::name:
+                dl->AddText(ImVec2(x0, y0), to_imu32(v.name_color, alpha), disp_name);
+                break;
+            case config::esp_elem_id::weapon_icon:
+                draw_cs2_weapon_icon(*dl, ImVec2(cx, y0 + 6.5f), 36.0f, 12.0f,
+                                     static_cast<int>(cs2_weapon_icon::m4a1_silencer),
+                                     to_imu32(v.weapon_icon_color, alpha));
+                break;
+            case config::esp_elem_id::weapon_name:
+                dl->AddText(ImVec2(x0, y0), to_imu32(v.weapon_color, alpha), "M4A1-S");
+                break;
+            case config::esp_elem_id::ammo:
+                dl->AddText(ImVec2(x0, y0), to_imu32(v.ammo_color, alpha), "[20]");
+                break;
+            case config::esp_elem_id::distance:
+                dl->AddText(ImVec2(x0, y0), to_imu32(v.distance_color, alpha), "6m");
+                break;
+            case config::esp_elem_id::flag_scoped:
+                dl->AddText(ImVec2(x0, y0), IM_COL32(125, 210, 255, alpha), "ZOOM");
+                break;
+            case config::esp_elem_id::flag_defuse:
+                dl->AddText(ImVec2(x0, y0), IM_COL32(255, 110, 95, alpha), "DEFUSE");
+                break;
+            case config::esp_elem_id::flag_flash:
+                dl->AddText(ImVec2(x0, y0), IM_COL32(255, 225, 120, alpha), "FLASH");
+                break;
+            case config::esp_elem_id::flag_kit:
+                dl->AddText(ImVec2(x0, y0), IM_COL32(160, 235, 160, alpha), "KIT");
+                break;
+            case config::esp_elem_id::flag_reload:
+                dl->AddText(ImVec2(x0, y0), IM_COL32(255, 185, 95, alpha), "RELOAD");
+                break;
+            case config::esp_elem_id::flag_armor:
+                dl->AddText(ImVec2(x0, y0), IM_COL32(165, 205, 255, alpha), "HK");
+                break;
+            case config::esp_elem_id::flag_money:
+                dl->AddText(ImVec2(x0, y0), IM_COL32(140, 235, 140, alpha), "$4200");
+                break;
+            case config::esp_elem_id::flag_ping:
+                dl->AddText(ImVec2(x0, y0), IM_COL32(205, 212, 226, alpha), "18ms");
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (edit != nullptr && !block_interaction) {
+        if (g_pv.hovered_id >= 0 && g_pv.dragging_id < 0) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                g_pv.dragging_id = g_pv.hovered_id;
+                g_pv.drag_target_side =
+                    edit->esp_layout[static_cast<std::size_t>(g_pv.hovered_id)].side;
+            } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                g_pv.popup_id = g_pv.hovered_id;
+                g_pv.open_popup_req = true;
+            }
+        }
+    }
+}
+
+void draw_manage_elements_drawer(config::visuals_cfg& v, const ImVec2& card_min,
+                                 const ImVec2& card_max) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const auto& pal = colors();
+    const float dt = std::max(0.0f, ImGui::GetIO().DeltaTime);
+    const float target = g_pv.drawer_open ? 1.0f : 0.0f;
+    g_pv.drawer_anim += (target - g_pv.drawer_anim) * std::min(1.0f, dt * 14.0f);
+    if (std::fabs(target - g_pv.drawer_anim) < 0.002f) g_pv.drawer_anim = target;
+
+    const float header_h = 26.0f;
+    const float body_full_h = 152.0f;
+    const float cur_h = header_h + body_full_h * g_pv.drawer_anim;
+    const ImVec2 dmin(card_min.x + 5.0f, card_max.y - cur_h - 4.0f);
+    const ImVec2 dmax(card_max.x - 5.0f, card_max.y - 4.0f);
+
+    dl->AddRectFilled(dmin, dmax, fade_col(pal.bg_card, 0.96f), 6.0f);
+    dl->AddRect(dmin, dmax, fade_col(g_pv.drawer_open ? pal.accent : pal.border_soft, 0.65f),
+                6.0f);
+
+    // Clickable drawer header bar
+    ImGui::SetCursorScreenPos(dmin);
+    ImGui::PushID("##pv_drawer_hdr");
+    if (ImGui::InvisibleButton("##hdr_btn", ImVec2(dmax.x - dmin.x, header_h))) {
+        g_pv.drawer_open = !g_pv.drawer_open;
+    }
+    const bool hdr_hov = ImGui::IsItemHovered();
+    ImGui::PopID();
+
+    if (hdr_hov) {
+        dl->AddRectFilled(dmin, ImVec2(dmax.x, dmin.y + header_h), fade_col(pal.bg_card_hover, 0.5f),
+                          6.0f);
+    }
+    ImGui::PushFont(font_small(), font_size_small());
+    dl->AddText(ImVec2(dmin.x + 10.0f, dmin.y + 6.0f), fade_col(pal.text), "Manage elements");
+    const char* toggle_txt = g_pv.drawer_open ? "Close" : "Open  (drag/right-click)";
+    const ImVec2 tsz = ImGui::CalcTextSize(toggle_txt);
+    dl->AddText(ImVec2(dmax.x - tsz.x - 10.0f, dmin.y + 6.0f),
+                fade_col(hdr_hov ? pal.accent : pal.text_faint), toggle_txt);
+    ImGui::PopFont();
+
+    if (g_pv.drawer_anim <= 0.05f) return;
+
+    struct chip_entry {
+        const char* label;
+        bool* toggle_ptr;
+        int popup_id;
+    };
+    bool box_enabled = (v.box != config::box_style::off);
+    const chip_entry elems[] = {
+        {"Box", nullptr, k_popup_box},
+        {"Health", &v.health_bar, static_cast<int>(config::esp_elem_id::health_bar)},
+        {"Armor", &v.armor_bar, static_cast<int>(config::esp_elem_id::armor_bar)},
+        {"Name", &v.name, static_cast<int>(config::esp_elem_id::name)},
+        {"Wep Icon", &v.weapon_icon, static_cast<int>(config::esp_elem_id::weapon_icon)},
+        {"Weapon", &v.weapon, static_cast<int>(config::esp_elem_id::weapon_name)},
+        {"Ammo", &v.ammo, static_cast<int>(config::esp_elem_id::ammo)},
+        {"Distance", &v.distance, static_cast<int>(config::esp_elem_id::distance)},
+        {"Skeleton", &v.skeleton, k_popup_skeleton},
+    };
+    const chip_entry flags[] = {
+        {"Scoped", &v.flag_scoped, static_cast<int>(config::esp_elem_id::flag_scoped)},
+        {"Defuse", &v.flag_defuse, static_cast<int>(config::esp_elem_id::flag_defuse)},
+        {"Flash", &v.flag_flash, static_cast<int>(config::esp_elem_id::flag_flash)},
+        {"Kit", &v.flag_kit, static_cast<int>(config::esp_elem_id::flag_kit)},
+        {"Reload", &v.flag_reload, static_cast<int>(config::esp_elem_id::flag_reload)},
+        {"Kevlar", &v.flag_armor, static_cast<int>(config::esp_elem_id::flag_armor)},
+        {"Money", &v.flag_money, static_cast<int>(config::esp_elem_id::flag_money)},
+        {"Ping", &v.flag_ping, static_cast<int>(config::esp_elem_id::flag_ping)},
+    };
+
+    const ImVec2 clip_a(dmin.x + 2.0f, dmin.y + header_h);
+    const ImVec2 clip_b(dmax.x - 2.0f, dmax.y - 2.0f);
+    dl->PushClipRect(clip_a, clip_b, true);
+    dl->AddLine(ImVec2(dmin.x + 8.0f, dmin.y + header_h), ImVec2(dmax.x - 8.0f, dmin.y + header_h),
+                fade_col(pal.border_soft));
+
+    const float pad_x = 10.0f;
+    float cx = dmin.x + pad_x;
+    float cy = dmin.y + header_h + 6.0f;
+    const float max_x = dmax.x - pad_x;
+
+    auto draw_group = [&](const char* title, const chip_entry* arr, int count) {
+        ImGui::PushFont(font_small(), 10.5f);
+        dl->AddText(ImVec2(dmin.x + pad_x, cy), fade_col(pal.text_faint), title);
+        cy += 15.0f;
+        cx = dmin.x + pad_x;
+
+        for (int i = 0; i < count; ++i) {
+            const chip_entry& e = arr[i];
+            const bool active = (e.popup_id == k_popup_box) ? box_enabled : *e.toggle_ptr;
+            const ImVec2 lbl_sz = ImGui::CalcTextSize(e.label);
+            const float chip_w = lbl_sz.x + 18.0f;
+            const float chip_h = 20.0f;
+            if (cx + chip_w > max_x && cx > dmin.x + pad_x) {
+                cx = dmin.x + pad_x;
+                cy += chip_h + 4.0f;
+            }
+            const ImVec2 ca(cx, cy);
+            const ImVec2 cb(cx + chip_w, cy + chip_h);
+
+            ImGui::SetCursorScreenPos(ca);
+            ImGui::PushID(e.popup_id * 32 + i);
+            if (ImGui::InvisibleButton("##pv_chip", ImVec2(chip_w, chip_h))) {
+                if (e.popup_id == k_popup_box) {
+                    v.box = (v.box == config::box_style::off) ? config::box_style::corner
+                                                              : config::box_style::off;
+                } else if (e.toggle_ptr) {
+                    *e.toggle_ptr = !(*e.toggle_ptr);
+                }
+            }
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                g_pv.popup_id = e.popup_id;
+                g_pv.open_popup_req = true;
+            }
+            const bool hov = ImGui::IsItemHovered();
+            ImGui::PopID();
+
+            const ImU32 bg = fade_col(active ? (hov ? pal.accent : pal.accent_soft)
+                                             : (hov ? pal.bg_card_hover : pal.bg_input));
+            const ImU32 bd = fade_col(active ? pal.accent : pal.border_soft);
+            dl->AddRectFilled(ca, cb, bg, 10.0f);
+            dl->AddRect(ca, cb, bd, 10.0f);
+            dl->AddText(ImVec2(ca.x + 9.0f, ca.y + (chip_h - lbl_sz.y) * 0.5f),
+                        fade_col(active ? pal.text : pal.text_muted), e.label);
+
+            cx += chip_w + 4.0f;
+        }
+        cy += 26.0f;
+        ImGui::PopFont();
+    };
+
+    draw_group("ELEMENTS", elems, static_cast<int>(sizeof(elems) / sizeof(elems[0])));
+    draw_group("FLAGS", flags, static_cast<int>(sizeof(flags) / sizeof(flags[0])));
+    dl->PopClipRect();
+}
+
+void draw_element_settings_popup(config::visuals_cfg& v) {
+    if (g_pv.open_popup_req) {
+        ImGui::OpenPopup("##pv_elem_popup");
+        g_pv.open_popup_req = false;
+    }
+    if (!ImGui::BeginPopup("##pv_elem_popup")) return;
+
+    auto edit_col = [](const char* label, config::rgba& c) {
+        float col[4] = {c.r, c.g, c.b, c.a};
+        if (ImGui::ColorEdit4(label, col,
+                              ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) {
+            c = {col[0], col[1], col[2], col[3]};
+        }
+    };
+
+    const int id = g_pv.popup_id;
+    if (id == k_popup_box) {
+        ImGui::TextUnformatted("Box ESP");
+        ImGui::Separator();
+        int style_idx = static_cast<int>(v.box);
+        const char* styles[] = {"Off", "2D", "Corner", "3D"};
+        if (ImGui::Combo("Style", &style_idx, styles, 4)) {
+            v.box = static_cast<config::box_style>(style_idx);
+        }
+        edit_col("Color", v.box_color);
+    } else if (id == k_popup_skeleton) {
+        ImGui::TextUnformatted("Skeleton");
+        ImGui::Separator();
+        ImGui::Checkbox("Enable", &v.skeleton);
+        edit_col("Color", v.skeleton_color);
+    } else {
+        switch (static_cast<config::esp_elem_id>(id)) {
+            case config::esp_elem_id::health_bar:
+                ImGui::TextUnformatted("Health bar");
+                ImGui::Separator();
+                ImGui::Checkbox("Enable", &v.health_bar);
+                ImGui::Checkbox("Gradient", &v.health_bar_gradient);
+                ImGui::Checkbox("Glow", &v.health_bar_glow);
+                edit_col("Full color", v.health_bar_color);
+                if (v.health_bar_gradient) edit_col("Low color", v.health_bar_grad_color);
+                break;
+            case config::esp_elem_id::armor_bar:
+                ImGui::TextUnformatted("Armor bar");
+                ImGui::Separator();
+                ImGui::Checkbox("Enable", &v.armor_bar);
+                ImGui::Checkbox("Glow", &v.armor_bar_glow);
+                edit_col("Color", v.armor_bar_color);
+                break;
+            case config::esp_elem_id::name:
+                ImGui::TextUnformatted("Name");
+                ImGui::Separator();
+                ImGui::Checkbox("Enable", &v.name);
+                edit_col("Color", v.name_color);
+                break;
+            case config::esp_elem_id::weapon_icon:
+                ImGui::TextUnformatted("Weapon icon");
+                ImGui::Separator();
+                ImGui::Checkbox("Enable", &v.weapon_icon);
+                edit_col("Color", v.weapon_icon_color);
+                break;
+            case config::esp_elem_id::weapon_name:
+                ImGui::TextUnformatted("Weapon name");
+                ImGui::Separator();
+                ImGui::Checkbox("Enable", &v.weapon);
+                edit_col("Color", v.weapon_color);
+                break;
+            case config::esp_elem_id::ammo:
+                ImGui::TextUnformatted("Ammo");
+                ImGui::Separator();
+                ImGui::Checkbox("Enable", &v.ammo);
+                edit_col("Color", v.ammo_color);
+                break;
+            case config::esp_elem_id::distance:
+                ImGui::TextUnformatted("Distance");
+                ImGui::Separator();
+                ImGui::Checkbox("Enable", &v.distance);
+                edit_col("Color", v.distance_color);
+                break;
+            case config::esp_elem_id::flag_scoped:
+                ImGui::Checkbox("Scoped flag", &v.flag_scoped);
+                break;
+            case config::esp_elem_id::flag_defuse:
+                ImGui::Checkbox("Defuse flag", &v.flag_defuse);
+                break;
+            case config::esp_elem_id::flag_flash:
+                ImGui::Checkbox("Flash flag", &v.flag_flash);
+                break;
+            case config::esp_elem_id::flag_kit:
+                ImGui::Checkbox("Defuser kit flag", &v.flag_kit);
+                break;
+            case config::esp_elem_id::flag_reload:
+                ImGui::Checkbox("Reloading flag", &v.flag_reload);
+                break;
+            case config::esp_elem_id::flag_armor:
+                ImGui::Checkbox("Armor / Helmet flag", &v.flag_armor);
+                break;
+            case config::esp_elem_id::flag_money:
+                ImGui::Checkbox("Money flag", &v.flag_money);
+                break;
+            case config::esp_elem_id::flag_ping:
+                ImGui::Checkbox("Ping flag", &v.flag_ping);
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (id >= 0 && id < config::k_esp_elem_count) {
+        const char* sides[] = {"Top", "Right", "Bottom", "Left"};
+        int s = v.esp_layout[static_cast<std::size_t>(id)].side;
+        if (ImGui::Combo("Side", &s, sides, 4)) {
+            v.esp_layout[static_cast<std::size_t>(id)].side = s;
+        }
+    }
+    ImGui::Separator();
+    if (ImGui::Button("Reset layout")) {
+        v.esp_layout = config::default_esp_layout();
+    }
+    ImGui::EndPopup();
 }
 
 }  // namespace
@@ -838,14 +1290,20 @@ void panel::rebuild_mesh() {
 
 void panel::draw(const ImVec2& size, camera& cam, const config::cham_material& material,
                  bool show_skeleton, const config::visuals_cfg* esp_overlay,
-                 const char* label_name) {
+                 const char* label_name, config::visuals_cfg* esp_edit) {
     if (!ready_ || !device_) return;
+
+    const float drawer_reserved_h = (esp_edit != nullptr) ? 30.0f : 0.0f;
+    const ImVec2 scene_size(size.x, std::max(80.0f, size.y - drawer_reserved_h));
+    const bool block_scene_input =
+        (esp_edit != nullptr && g_pv.drawer_open) || ImGui::IsPopupOpen("##pv_elem_popup");
 
     ImGui::PushID("##preview");
     const ImVec2 pos = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##orbit", size,
+    ImGui::InvisibleButton("##orbit", scene_size,
                            ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
-    const bool hovered = ImGui::IsItemHovered();
+    const bool hovered = ImGui::IsItemHovered() && !block_scene_input && g_pv.hovered_id < 0 &&
+                         g_pv.dragging_id < 0;
     if (hovered) {
         ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
         const float wheel = ImGui::GetIO().MouseWheel;
@@ -854,7 +1312,8 @@ void panel::draw(const ImVec2& size, camera& cam, const config::cham_material& m
         }
         if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) cam.reset();
     }
-    if (ImGui::IsItemActive()) {
+    if (ImGui::IsItemActive() && !block_scene_input && g_pv.dragging_id < 0 &&
+        g_pv.hovered_id < 0) {
         const ImVec2 delta = ImGui::GetIO().MouseDelta;
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
             cam.yaw -= delta.x * 0.35f;
@@ -873,7 +1332,7 @@ void panel::draw(const ImVec2& size, camera& cam, const config::cham_material& m
                          std::sin(cam.pitch * k_pi / 180.0f)};
     const math::vec3 eye = cam.target + dir * cam.distance;
     const math::mat4 view = look_at(eye, cam.target);
-    const float aspect = (size.y > 1.0f) ? (size.x / size.y) : 1.0f;
+    const float aspect = (scene_size.y > 1.0f) ? (scene_size.x / scene_size.y) : 1.0f;
     const math::mat4 proj = perspective(44.0f, aspect, 1.0f, 2000.0f);
     const math::mat4 view_proj = multiply(view, proj);
 
@@ -966,42 +1425,53 @@ void panel::draw(const ImVec2& size, camera& cam, const config::cham_material& m
     if (old_dsv) old_dsv->Release();
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 rect_max(pos.x + size.x, pos.y + size.y);
-    dl->AddRectFilled(pos, rect_max, fade_col(IM_COL32(15, 19, 27, 255)), 6.0f);
-    dl->PushClipRect(pos, rect_max, true);
+    const ImVec2 card_max(pos.x + size.x, pos.y + size.y);
+    const ImVec2 scene_max(pos.x + scene_size.x, pos.y + scene_size.y);
+    dl->AddRectFilled(pos, card_max, fade_col(IM_COL32(15, 19, 27, 255)), 6.0f);
+    dl->PushClipRect(pos, card_max, true);
 
     if (material.enabled) {
-        const ImVec2 glow_center(pos.x + size.x * 0.52f, pos.y + size.y * 0.50f);
+        const ImVec2 glow_center(pos.x + scene_size.x * 0.52f, pos.y + scene_size.y * 0.50f);
         const ImU32 aura = to_imu32(colour, 16);
-        dl->AddCircleFilled(glow_center, size.y * 0.44f, aura, 48);
-        dl->AddCircleFilled(glow_center, size.y * 0.30f, aura, 48);
+        dl->AddCircleFilled(glow_center, scene_size.y * 0.44f, aura, 48);
+        dl->AddCircleFilled(glow_center, scene_size.y * 0.30f, aura, 48);
     }
 
-    dl->AddImage(reinterpret_cast<ImTextureID>(srv_), pos, rect_max, ImVec2(0, 0), ImVec2(1, 1),
+    dl->AddImage(reinterpret_cast<ImTextureID>(srv_), pos, scene_max, ImVec2(0, 0), ImVec2(1, 1),
                  fade_col(IM_COL32(255, 255, 255, 255)));
 
+    const config::visuals_cfg* active_vis = esp_edit ? esp_edit : esp_overlay;
+    const ImU32 skel_col = active_vis ? to_imu32(active_vis->skeleton_color, 235)
+                                      : fade_col(IM_COL32(255, 255, 255, 225));
     if (show_skeleton) {
         for (const auto& [a, b] : sdk::k_preview_links) {
             if (a >= sdk::pj_count || b >= sdk::pj_count) continue;
             ImVec2 pa{}, pb{};
-            if (project(posed_joints_[a], view_proj, pos, size, pa) &&
-                project(posed_joints_[b], view_proj, pos, size, pb)) {
+            if (project(posed_joints_[a], view_proj, pos, scene_size, pa) &&
+                project(posed_joints_[b], view_proj, pos, scene_size, pb)) {
                 dl->AddLine(pa, pb, fade_col(IM_COL32(10, 12, 18, 170)), 2.4f);
-                dl->AddLine(pa, pb, fade_col(IM_COL32(255, 255, 255, 225)), 1.3f);
+                dl->AddLine(pa, pb, skel_col, 1.3f);
             }
         }
     }
 
-    if (esp_overlay && esp_overlay->enabled) {
+    if (active_vis && active_vis->enabled) {
         const math::vec3 bmin{std::min(bounds_min_.x, -12.0f), bounds_min_.y - 1.5f, 0.0f};
         const math::vec3 bmax{bounds_max_.x + 1.5f, bounds_max_.y + 1.5f,
                               std::max(bounds_max_.z + 1.5f, 70.0f)};
-        const math::vec3 head_pt = posed_joints_[sdk::pj_head] + math::vec3{0.0f, 0.0f, 4.5f};
-        draw_esp_overlay(dl, *esp_overlay, view_proj, pos, size, bmin, bmax, head_pt, label_name);
+        draw_esp_overlay(dl, *active_vis, esp_edit, view_proj, pos, scene_size, bmin, bmax,
+                         label_name, block_scene_input);
     }
 
     dl->PopClipRect();
-    dl->AddRect(pos, rect_max, fade_col(colors().border_soft), 6.0f);
+
+    if (esp_edit != nullptr) {
+        draw_manage_elements_drawer(*esp_edit, pos, card_max);
+        draw_element_settings_popup(*esp_edit);
+        ImGui::SetCursorScreenPos(ImVec2(pos.x, card_max.y + 4.0f));
+    }
+
+    dl->AddRect(pos, card_max, fade_col(colors().border_soft), 6.0f);
 }
 
 panel& shared_panel() {

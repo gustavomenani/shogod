@@ -43,10 +43,10 @@ public:
                       std::span<const std::pair<int, int>> connections);
 
     // Renders the model into the offscreen target and draws it plus matching
-    // skeleton / ESP overlays in the current ImGui window.
+    // skeleton / interactive ESP overlays and "Manage elements" drawer.
     void draw(const ImVec2& size, camera& cam, const config::cham_material& material,
               bool show_skeleton, const config::visuals_cfg* esp_overlay = nullptr,
-              const char* label_name = "SAS");
+              const char* label_name = "SAS", config::visuals_cfg* esp_edit = nullptr);
 
     [[nodiscard]] bool ready() const noexcept { return ready_; }
 

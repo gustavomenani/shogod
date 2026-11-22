@@ -6,6 +6,7 @@
 #include "engine/module.hpp"
 #include "engine/render/dx11.hpp"
 #include "engine/runtime.hpp"
+#include "features/audio/hitsounds.hpp"
 #include "features/chams/chams.hpp"
 #include "features/createmove.hpp"
 #include "features/esp/esp.hpp"
@@ -824,6 +825,7 @@ HRESULT WINAPI hk_present(IDXGISwapChain* swapchain, UINT sync, UINT flags) {
                 features::chams::update_state(runtime::anchors(), runtime::netvars(), cfg.visuals, 0,
                                               0, false, false);
                 features::world::update_config(cfg.visuals, runtime::netvars());
+                features::audio::pump_hitsounds(nullptr, 0);
             }
             const auto stats = features::esp::draw(cfg, snap ? &*snap : nullptr,
                                                   runtime::backtrack(), runtime::live(),
@@ -1115,18 +1117,21 @@ void run_tick_pipeline(void* self) {
     QueryPerformanceFrequency(&perf_freq);
     QueryPerformanceCounter(&perf_a);
     sdk::collect_frame(anch, nv, write);
-    sdk::update_shot_events(anch.game_event_manager_cell, anch.client_base, anch.client_size,
-                            write.local_controller);
     process_camera_request(write);
     game_settings settings{};
     {
         std::lock_guard guard(g_settings_mutex);
         settings = g_settings;
     }
+    sdk::update_shot_events(anch.game_event_manager_cell, anch.client_base, anch.client_size,
+                            write.local_controller, settings.config.misc.info.hitmarker,
+                            &settings.config.misc.hitsound);
+    features::audio::pump_hitsounds(anch.play_vsnd, anch.cvar);
 
     if (was_in_game && !write.in_game) {
         features::chams::clear_cache();
         features::world::clear_backups();
+        features::audio::reset_hitmarker();
         runtime::backtrack().reset();
         g_cm_state = {};
     }

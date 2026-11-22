@@ -133,6 +133,32 @@ struct netvars {
     std::int32_t c4_site = 0;
     std::int32_t c4_defused = 0;
     std::int32_t c4_ticking = 0;
+
+    // Movement / Jump / Gravity (subtick bhop + auto-strafe)
+    std::int32_t ent_gravity_scale = 0;
+    std::int32_t id_world_group = 0;
+    std::int32_t move_buttons = 0;
+    std::int32_t move_cmd_forward = 0;
+    std::int32_t move_cmd_left = 0;
+    std::int32_t move_maxspeed = 0;
+    std::int32_t move_surface_friction = 0;
+    std::int32_t move_stamina = 0;
+    std::int32_t move_modern_jump = 0;
+    std::int32_t jump_last_press_tick = 0;
+    std::int32_t jump_last_press_frac = 0;
+    std::int32_t jump_last_landed_tick = 0;
+    std::int32_t jump_last_landed_frac = 0;
+    std::int32_t wep_mode = 0;
+    std::int32_t vdata_max_speed = 0;
+
+    // Observer / Spectators & Player Metadata
+    std::int32_t ctrl_observer_pawn = 0;
+    std::int32_t ctrl_money_services = 0;
+    std::int32_t money_account = 0;
+    std::int32_t ctrl_ping = 0;
+    std::int32_t pawn_observer_services = 0;
+    std::int32_t obs_target = 0;
+    std::int32_t obs_mode = 0;
 };
 
 bool init_schema(std::uintptr_t schema_system, netvars& out);

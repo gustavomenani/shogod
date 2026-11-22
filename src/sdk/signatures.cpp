@@ -366,6 +366,14 @@ void resolve_visual_and_chams(const module::info& client) {
             "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 48 8B 59 ? 48 8B F2 48 63 79 ? 48 C1 E7 ? 48 03 FB 48 3B DF",
             "FindMaterialParam"));
     }
+
+    const module::info snd = module::find("soundsystem.dll");
+    if (snd.valid()) {
+        g_anchors.play_vsnd = reinterpret_cast<void*>(find_once(
+            snd,
+            "48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 55 48 8D 6C 24 ? 48 81 EC ? ? ? ? 33 F6 C7 45 ? ? ? ? ? 4C 8B C1",
+            "PlayVsnd", false));
+    }
 }
 
 }  // namespace
