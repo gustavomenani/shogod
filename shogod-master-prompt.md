@@ -1,221 +1,117 @@
-# PROJETO: SHOGOD — cheat interno para CS2 (HvH)
+# shogod — Master Architecture & Engineering Specification (CS2 x64 Internal)
 
-## 0. MISSÃO
-
-Construa, do zero, o **Shogod**: um cheat interno para Counter-Strike 2
-(`game/csgo/bin/win64/client.dll`), voltado a HvH em servidores comunitários.
-Referência de produto: Neverlose, Gamesense, Fatality — menu customizado,
-módulos completos, zero placeholder. O resultado é um repositório compilando,
-verificado em partida offline com bots e apresentado com evidência de teste.
-
-Shogod não é protótipo. Feature que aparece no menu existe e funciona no jogo, ou
-não aparece. Nenhum "MVP", nenhum TODO, nenhum stub, nenhuma opção decorativa.
-
-### Identidade fixa do produto (usar exatamente)
-
-| Onde | Valor |
-|---|---|
-| Repositório / solução | `shogod` |
-| DLL | `shogod.dll` |
-| Namespace C++ | `shogod::` |
-| Header do menu | `SHOGOD` |
-| Watermark in-game | `shogod` |
-| Versão | `shogod vX.Y.Z` |
-| Configs | `%APPDATA%\shogod\configs\*.json` |
-| Logs | `%APPDATA%\shogod\logs\shogod-YYYYMMDD.log` |
-| Prefixo de log | `[shogod]` |
-
-Toda string visível sai do mesmo lugar (`brand.hpp`), sem repetição espalhada.
+> Especificação mestre atualizada da arquitetura, subsistemas, contratos de thread-safety e fluxo spec-driven (OpenSpec) do `shogod` (`Windows 10/11 x64`, `C++20`, `MSVC`, `CMake`, `DirectX 11`).
 
 ---
 
-## 1. PLANO ANTES DE CÓDIGO (obrigatório)
+## 1. Visão Geral e Princípios de Arquitetura
 
-1. Inspecione o ambiente: repo existente, solução VS, SDK vendorizado, build de
-   referência do jogo. Liste o que existe antes de assumir qualquer coisa.
-2. Abra `todo` com fases; cada módulo vira item rastreável.
-3. Escreva `docs/PLAN.md` com:
-   - árvore de módulos e dependência unidirecional
-     (`engine → sdk → features → ui → config`, conforme `cs2-hvh-build`);
-   - tabela de slices: dono exclusivo de arquivos, contratos consumidos e
-     expostos, critério de aceite observável;
-   - tabela de anchors (nome, pattern, resolve `rip`/`abs`/`vtable`, RVA,
-     readback de validação) — preenchida por RE desta build, nunca copiada;
-   - ordem de execução, o que roda em paralelo, quem é o dono da integração.
-4. Só então implemente. Plano mudou → atualiza o arquivo e explica em uma linha.
+O `shogod` é uma DLL interna `x64` (`shogod.dll`) e um injetor nativo (`shogod_loader.exe`) para Counter-Strike 2 (`cs2.exe`), projetados com:
 
-## 2. SKILLS — LEIA ANTES DE USAR, UMA AUTORIDADE POR ÁREA
+- **Desacoplamento estrito entre Game Thread e Render Thread**:
+  - A **Game Thread** (`CCSGOInput::vtable[4]` / `SendMove` `vtable[8]`) coleta o `frame_snapshot`, executa `LagCompensation`, `BunnyHop`, `Auto-Strafe`, `Anti-Aim`, `Movement Fix`, `AutoWall` e `RageBot`, e publica o snapshot em um buffer triplo lock-free (`sdk::triple_buffer<sdk::frame_snapshot>`).
+  - A **Render Thread** (`IDXGISwapChain::Present` / `ResizeBuffers`) consome exclusivamente o `frame_snapshot` publicado para desenhar o ESP e a UI ImGui de 6 abas, sem jamais dereferenciar ponteiros brutos de entidades do jogo.
+- **Zero-Dependency Protobuf `CUserCommand`**:
+  - Manipulação direta de `CUserCmd` (`0x98` bytes), `CBaseUserCmdPB`, `CSGOInputHistoryEntryPB`, `CSubtickMoveStep` (`RepeatedPtrField`) e `CInButtonState` sem dependência de `libprotobuf`, preservando o pool da arena do motor ao remover ou reordenar subticks.
+- **Idempotência Sub-Frame (~300 Hz vs 64 Hz)**:
+  - `CCSGOInput::vtable[4]` roda uma vez por render frame (~275–300 Hz, 4 a 5 sub-frames por tick de 64 Hz) sobre o mesmo `cmd->command_number`, invocando Client Prediction ao final de cada sub-frame.
+  - O pipeline `run_createmove` trava (`tick_input_latch`) o estado físico inicial do tick (`on_ground`, `move_type`, `velocity`, `speed_2d`, `jump_held`, `raw_held`, wish move) na transição de `command_number`, impedindo que a predição local do Sub-frame 0 cancele pulos de BunnyHop ou rotacione botões múltiplas vezes nos Sub-frames 1..4.
+- **Isolamento de Câmera Local (`SendMove` Hook)**:
+  - O hook em `CCSGOInput::SendMove` (`vtable[8]`) preserva os `viewangles` reais da câmera no cliente enquanto transmite os ângulos de `Anti-Aim` e `Silent Aim` nos comandos enviados ao servidor.
 
-**Núcleo (obrigatórias, ler primeiro):**
-- `skill://cs2-internal-rea` — anchors em `client.dll`, schema runtime, hooks,
-  performance, verificação pós-patch. Autoridade em RE e engine de CS2.
-- `skill://cs2-hvh-build` — módulos, contrato de slice, snapshot/threading,
-  signature table, config, wiring audit, gates, playbook de patch. Autoridade
-  em arquitetura e definição de pronto.
-- `skill://dx11-imgui-render` — Present/ResizeBuffers, restauração de estado,
-  render target offscreen, paridade de material, armadilhas do ImGui, device
-  loss. Autoridade em render, menu e preview 3D.
+---
 
-**Apoio (carregar só quando a tarefa pede):**
-- `cpp-core-guidelines` — review de C++ e decisões de ownership/RAII. Único
-  padrão de C++ do projeto (não usar `cpp-coding-standards` em paralelo).
-- `cpp-testing` — harness gtest/CTest, sanitizers, flaky.
-- `windows-internals` — loader, ordem de carga de DLL, modelo de token,
-  superfícies de detecção. Para o loader e o `docs/DETECTION.md`.
-- `memory-scanning` / `cheat-engine-cli` — confirmar valor/estrutura em runtime
-  antes de virar hipótese (scan de HP, arma, view matrix). Nunca substitui RE.
-- `idapython` e `re-x64dbg` — quando o REA não bastar: script de IDA ou
-  breakpoint em `x64dbg` para confirmar fluxo. Fallback, não caminho principal.
-- `windbg-diagnostic-method` — dump de crash da DLL injetada; análise de
-  access violation com evidência.
-- `code-obfuscation-deobfuscation` / `unpacking-protected-binaries` — só se
-  alguma proteção aparecer no caminho; `client.dll` não é protegida.
-- `systematic-debugging` — qualquer bug: reprodução antes do fix.
-- `verification-before-completion` — nada é "pronto" sem prova executada.
-- `requesting-code-review` — review independente por área antes do merge.
-- `subagent-driven-development` / `dispatching-parallel-agents` — orquestração.
-- `impeccable` — direção visual do menu (hierarquia, densidade, tipografia).
+## 2. Mapa de Diretórios do Repositório
 
-**Lacuna de skill:** se faltar procedimento (ex.: resource system de modelo,
-antiaim math, heurística de resolver), use `find-skills` e, se não houver,
-`web_search` para localizar skill ou documentação oficial. Skill da internet
-entra como procedimento a validar contra a build, nunca como código cego.
-Registre tudo em `docs/SKILLS.md`: o que usou, fonte, e o que validou.
+```text
+shogod/
+├── CMakeLists.txt                  # Build system (shogod_core, shogod_ui, shogod, shogod_loader, shogod_tests)
+├── README.md                       # Guia rápido de build, arquitetura e uso
+├── AGENT.MD                        # Convenções operacionais para agentes no repositório
+├── shogod-master-prompt.md         # Especificação mestre atualizada do projeto
+├── docs/
+│   ├── PLAN.md                     # Roadmap e status atual dos subsistemas
+│   ├── USAGE.md                    # Manual de compilação, injeção, configuração e testes
+│   └── RE/
+│       └── findings.md             #Offsets, vtables e estruturas verificadas em client.dll / scenesystem.dll
+├── openspec/
+│   ├── config.yaml                 # Configuração do fluxo spec-driven (OpenSpec)
+│   └── changes/                    # Mudanças especificadas (proposal, design, specs, tasks)
+├── loader/
+│   └── main.cpp                    # Injetor CLI (shogod_loader.exe)
+├── src/
+│   ├── main.cpp                    # Entrypoint DllMain e thread de bootstrap/unload
+│   ├── core/                       # Logger spdlog, crash handler VEH, math (vec3, angles, view_matrix)
+│   ├── config/                     # Schema config_v1, serialização JSON (nlohmann), bind_state e perfis por arma
+│   ├── engine/                     # Hooks D3D11/WndProc/CCSGOInput/SceneSystem, renderer DX11 e estado runtime
+│   ├── sdk/                        # SchemaSystem netvars, pattern scanner, CUserCommand protobuf, trace/autowall
+│   ├── features/
+│   │   ├── createmove.hpp/.cpp     # Orquestrador de tick: Latch, Bhop, AutoStrafe, AA, Movement Fix, RageBot
+│   │   ├── lagcomp.hpp/.cpp        # Histórico de LagCompensation por pawn/handle e extrapolação wall-clamped
+│   │   ├── backtrack.hpp           # Histórico visual para Backtrack Ghost
+│   │   ├── aaa/antiaim.hpp/.cpp    # Anti-Aim (Backward, Jitter, Random, At-Targets, Freestanding, Auto-Adjust)
+│   │   ├── rage/target.hpp/.cpp    # Seleção de alvo, AutoStop, AutoStrafe, BunnyHop e Shot Delay
+│   │   ├── math/                   # Geometria de cápsulas/hitboxes (19 hitboxes), multipoint e hitchance analítico
+│   │   └── visuals/                # ESP 2D/Skeleton/Offscreen, SceneSystem Chams e World/Light Modulation
+│   └── ui/                         # Menu ImGui bespoke (6 abas), tema, animações e widgets customizados
+├── tests/
+│   ├── test_features.cpp           # Suíte unitária (Math, Config, Binds, Hitbox, Hitchance, AA, Rage, Movement)
+│   ├── test_e2e_hvh.cpp            # Suíte E2E de simulação HvH (64 Hz / 300 Hz sub-frame)
+│   └── fixtures/                   # Fixtures determinísticas de física CS2, arena de hitboxes e configs
+└── third_party/
+    ├── imgui/                      # Dear ImGui v1.91.x (Win32 + DX11)
+    └── minhook/                    # MinHook x64
+```
 
-## 3. ESCOPO FUNCIONAL — TUDO ENTRA
+---
 
-### 3.1 RageBot
+## 3. Subsistemas e Contratos Técnicos
 
-- Seleção de alvo: FOV por arma, distância, prioridade (distância / menor HP /
-  ameaça / cycling), ignore-limbs opcional.
-- Aim points: head, neck, chest, stomach, pelvis, legs + multi-point com
-  percentual de safe point e escala de hull.
-- Auto-fire com hitchance spread-aware, min-damage por arma, auto-scope,
-  auto-stop/auto-crouch, delay por tick.
-- Penetration: dano através de parede, escolha de ponto penetrável, limite
-  configurável.
-- Backtrack: janela em ticks/latência, validação de histórico — não atirar em
-  posição reconstruída inválida; chams de backtrack ligados ao mesmo histórico.
-- Antiaim: yaw/pitch base (desync, jitter, random, fake-static), condicionais
-  por estado (standing/moving/air, fake-walk, on-shot), integrado ao fake-lag.
-- Resolver: heurísticas por histórico de ângulo e desync, por arma/estado, com
-  log de qual heurística disparou por alvo em modo debug.
-- Perfis "safe" e "rage" trocando min-damage/hitchance/pontos.
+### 3.1 SDK, SchemaSystem e Pattern Scanning (`src/sdk/`)
+- **Resolução Dinâmica via `SchemaSystem_001`**: Todos os netvars (`m_iHealth`, `m_iTeamNum`, `m_vOldOrigin`, `m_vecViewOffset`, `m_fFlags`, `m_vecAbsVelocity`, `m_pGameSceneNode`, `m_modelState`, `m_pWeaponServices`, `m_AttributeManager`, `m_iItemDefinitionIndex`, `m_nNextPrimaryAttackTick`, `m_flNextAttack`, `m_bIsScoped`, `m_bResumeZoom`, `m_aimPunchCache`) são resolvidos dinamicamente em tempo de carga.
+- **4 Anchors Principais em `client.dll`**:
+  1. `dwEntityList` (`CGameEntitySystem`)
+  2. `dwViewMatrix` (`4x4` float world-to-clip matrix)
+  3. `dwLocalPlayerController` (`CCSPlayerController`)
+  4. `dwCSGOInput` (`CCSGOInput`)
+- **Engine Trace & AutoWall (`src/sdk/trace.cpp`)**:
+  - Usa o TraceManager nativo de `client.dll` + `CCSWeaponBaseVData` (`m_flDamage`, `m_flPenetration`, `m_flRange`, `m_flRangeModifier`, `m_flHeadshotMultiplier`, `m_flArmorRatio`) para simular penetração multi-superfície e calcular dano real com armadura/capacete.
 
-### 3.2 Visuals
+### 3.2 Movimentação Aérea, BunnyHop e Auto-Strafe (`src/features/createmove.*`, `src/features/rage/target.*`)
+- **BunnyHop Sub-Frame-Safe (`step_bhop` + `tick_input_latch`)**:
+  - `step_bhop` só avança transições de tick (`!on_ground`, `release_next`, `!was_on_ground`) quando `command_number != s.last_cmd`, garantindo que o pulo engatilhado no Sub-frame 0 permaneça ativo até o `SendMove`.
+- **Auto-Strafe Alinhado à Velocidade com Estabilização de Lóbulo (`compute_runtime_air_strafe`)**:
+  - Enquanto no ar (`!on_ground`), desativa `auto_adjust` (`+36°` terrestre) e `at_targets`/`freestanding`, ancorando `ref_yaw` à direção contínua de velocidade (`vel_yaw + 180°` com Anti-Aim ativo ou `vel_yaw` sem Anti-Aim).
+  - Isso mantém `rel = yaw_delta(ref_yaw, steer_yaw)` exatamente em `±90°` (`tilt == 0°`), eliminando snaps de `45°` entre setores octogonais.
+  - `step_runtime_strafe_sign` segue imediatamente a rotação do mouse (`|cam_delta| >= 0.25°`) ou teclas direcionais (`A`/`D`/`S`), e sustenta cada lóbulo reto por no mínimo `k_min_strafe_lobe_ticks = 4` ticks para eliminar vibração de 64 Hz no AnimGraph2.
+- **Limpeza Completa de `CInButtonState` (`sync_move_held_buttons`)**:
+  - Limpa `held`, `toggle` e `scroll` em `k_move_button_mask` (`IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT`) antes de gravar os bits do vetor final `(forwardmove, leftmove)`.
 
-- ESP: box (2D/3D/corner), health com gradiente, armor, name, weapon, ammo,
-  flags (scoped, defusing, flashed, reloading, kit), distance, skeleton
-  (bones do `m_modelState`), glow, chams (player, viewmodel, arms, weapon;
-  flags ignore-z/wireframe/flat/overlay), backtrack ghost, hitmarker, damage
-  indicator direcional, bullet tracer, spectator list.
-- World: bomb timer/site, grenade helper com predição de trajetória
-  (smoke/molotov/flash), projectile ESP, dropped weapons, radar hack, remoção
-  de flash/smoke/scope overlay, world modulation.
-- **PREVIEW 3D (obrigatório):** player model em target DX11 offscreen exibido
-  por `ImGui::Image`, conforme `dx11-imgui-render`:
-  - órbita/zoom por drag e scroll, reset por duplo-clique;
-  - fundo neutro com grade, iluminação simples, contato/sombra;
-  - os MESMOS `cham_material` do jogo aplicados ao modelo, reagindo em tempo
-    real a cor, alpha, flags, wireframe e ignore-z;
-  - overlays ligados ao estado real: skeleton, pontos de aim, hull de
-    multi-point — projetados pela mesma câmera do mesh;
-  - um único sistema de material, dois consumidores. Sem lógica duplicada.
+### 3.3 RageBot, LagCompensation e Hitboxes (`src/features/createmove.*`, `src/features/lagcomp.*`)
+- **Extrapolação Condicional (`compute_extrapolation_gap_ms`)**:
+  - Só extrapola quando `tick_gap >= 2` (choke/lag real), mantendo `0 ms` contra alvos atualizados (`tick_gap <= 1`).
+- **Ordem Estrita Fraca de Hitboxes (`better_rage_shot_point` + `update_rage_shot_slot`)**:
+  - Avaliação lazy de hitchance por slot (`best_head` e `best_body`), garantindo que pontos de borda/multipoint substituam o centro quando o centro falha no limiar de hitchance.
+  - Respeita `prefer_body_aim`, `force_body_aim`, `ignore_limbs` (separando `pelvis` de `arms`/`legs`) e letalidade.
+- **Coordenação `AutoStop` + `BunnyHop`**:
+  - Enquanto o jogador mantém BunnyHop ativo no ar ou no tick de pulo (`bhop_active && jump_held && (!on_ground || bhop_do_jump)`), a pré-frenagem do `AutoStop` é suprimida até que o tiro esteja qualificado (`shot_qualified`).
 
-### 3.3 Misc
+### 3.4 Anti-Aim e Movement Fix (`src/features/aaa/antiaim.*`)
+- **Modos de Pitch/Yaw**: Pitch (`Off`, `Down +89°`, `Up -89°`, `Zero 0°`), Yaw (`Off`, `Backward 180°`, `Jitter`, `Random`), `At Targets`, `Freestanding` com histerese e probes dentro do hull de `16u`, e `Auto-Adjust` (`+36°` rifle / `+18°` pistola no chão).
+- **Quantized Ground Move (`compute_quantized_ground_move`)**:
+  - Difusão de erro 2D (`ΣΔ`) sobre os 8 setores quantizados de `SetupMove` (`roundf(forwardmove)`, `roundf(leftmove)` em `{-1, 0, +1}`), preservando a trajetória exata em qualquer yaw de Anti-Aim.
 
-- Movement: bhop com strafe assist, auto-strafe, edge-jump, fast-ladder, slide.
-- Utilities: knife-bot com dano calculado, auto-accept, auto-pistol, grenade
-  line-up, fake-duck, third-person com modelo carregado, free-look.
-- Info: match info, watermark `shogod`, lista de keybinds, hit log com
-  dano/hitgroup/resolver.
-- Toggles para desligar features que plugins de servidor comunitário detectam;
-  documentados em `docs/DETECTION.md`.
+### 3.5 Visuals, SceneSystem Chams e UI ImGui (`src/features/visuals/`, `src/ui/`)
+- **ESP**: Bounding box (`Off`, `Full`, `Corners`), barra de vida com gradiente e texto condicional, barra de armadura, skeleton (bone matrix stride `32B`), nome, arma (ícone/texto), munição, flags (`SCOPED`, `FLASHED`, `DEFUSING`), offscreen arrows, sound rings, backtrack ghost e penetration crosshair.
+- **Chams & World Modulation**: Hooks em `scenesystem.dll` para materiais customizados (Enemy Visible/XQZ, Team, Local, Arms, Weapon, Scope Blend) e modulação de mundo/luz/exposição.
+- **Menu ImGui (6 Abas)**: `RageBot`, `Anti-Aim`, `Visuals`, `Misc`, `Configs`, `Settings`.
 
-### 3.4 Config e Menu
+---
 
-- Config: structs versionadas, JSON, import/export, preservação de chave
-  desconhecida, migração, clamp com log, perfis por estilo de jogo.
-- Menu: ImGui estilizado do zero. Sidebar (RageBot, Visuals, Misc, Config,
-  Settings), header `SHOGOD` com status vivo (FPS, tick, jogadores, saúde dos
-  anchors), transição animada de aba, abertura/fechamento animados, tooltip em
-  todo controle não óbvio, fontes de arquivo versionado, tema claro/escuro com
-  acento configurável, nada cortado em 1080p.
-- Input: menu aberto bloqueia input do jogo no `WndProc`; keybinds por feature
-  (toggle/hold) salvos no config.
+## 4. Fluxo de Desenvolvimento Spec-Driven (OpenSpec)
 
-### 3.5 Engine (base)
-
-- Injeção: DLL loader próprio; manual-map opcional documentado; unload limpo
-  restaurando hooks em ordem inversa.
-- Hooks: `Present` + `ResizeBuffers` (dummy swapchain, ImGui DX11),
-  `CCSGOInput::CreateMove`, `WndProc` via `SetWindowLongPtrW`.
-- SDK: interfaces via `CreateInterface`; schema system runtime
-  (`SchemaSystem_001`) para todo netvar — offset hardcoded proibido onde o
-  schema resolve; bone array `m_modelState + 0x80` count `+0x8c`; view matrix;
-  `CGameTraceManager` para visibilidade/trigger.
-- Signature table com resolve explícito, validação no init, log OK/FAIL por
-  anchor; anchor falhou → feature desliga e aparece no status do menu.
-
-## 4. PADRÃO DE ENGENHARIA (ANTI-BUG)
-
-- C++20, MSVC, x64, Release `/O2`, libs vendorizadas e pinadas.
-- Zero heap por frame após init; snapshot fixo de 64 players × 32 bones; um
-  scan de entidade por frame; bones uma vez por frame; nada de mutex em
-  `Present`/`CreateMove`; publicação por atomic pointer/seqlock; rejeitar
-  matriz não-finita e `w <= 0.001`.
-- Validar ponteiro de entidade antes de cada deref (mapa muda, player sai).
-- `ResizeBuffers` libera view própria antes de chamar original.
-- Todo acesso ao jogo passa por camada de validação (nulo, range, tipo).
-  Crash = bug bloqueante.
-- **Wiring audit**: cada item do menu nomeia a função que o consome. Item sem
-  consumidor ou consumidor sem item = slice não terminada.
-- Logging com níveis; modo debug expõe anchors e decisão do resolver.
-
-## 5. ORQUESTRAÇÃO — 20+ SUBAGENTS, CONTRATO PRIMEIRO
-
-- Slices com dono exclusivo de arquivo e contrato preenchido (formato em
-  `cs2-hvh-build`): objetivo, arquivos, interfaces, aceite, proibições.
-- Slices independentes em paralelo no mesmo batch; só sequencial o que tem
-  dependência dura. Um único dono de integração faz o build completo e a suite.
-- Seis slices, no mínimo, com revisão independente: ragebot, antiaim/resolver,
-  render/preview, menu, engine/hooks, config.
-- Subagent travado não vira fatia faltando: redivida, mude a estratégia,
-  derive o anchor por outro caminho.
-
-## 6. GATES DE ACEITE (nesta ordem)
-
-1. **Unidade** — scanner em buffer sintético com match conhecido; W2S contra
-   matriz calculada à mão; normalização de ângulo; hull 0%/100%; config
-   round-trip com chave desconhecida.
-2. **Init** — injetar em partida offline com bots; os anchors logam OK;
-   feature set reportado. FAIL explicado no log.
-3. **In-game** — 10 minutos offline: ESP alinhado em 1080p e 1440p; sem crash;
-   menu abre/fecha sem vazar input; config salva e recarrega; preview 3D reage
-   aos sliders de material.
-4. **Soak** — 2 horas, reinjeção repetida, unload restaura hooks; nenhum módulo
-   listado após unload manual-map.
-5. **Prova visual** — screenshots: 5 abas do menu, preview com chams + skeleton,
-   ESP em jogo, hit log.
-
-Gate que não rodou é reportado como não rodou. Nunca como aprovado.
-
-## 7. ENTREGÁVEIS
-
-1. Repositório `shogod` compilando em Release x64 sem erro.
-2. `docs/PLAN.md`, `docs/RE/findings.md` (anchors + signatures + build
-   identity), `docs/SKILLS.md`, `docs/DETECTION.md`, `docs/USAGE.md`.
-3. Signature table validada com log de init.
-4. Screenshots do gate 5.
-5. Relatório final: o que funciona com evidência, o que foi desligado por
-   anchor e por quê (com log), e como re-derivar após patch da Valve.
-
-## 8. REGRAS DURAS
-
-- Não pare até compilar, testar e provar. Resposta parcial não é entrega.
-- Não invente offset. Todo número vem de RE desta build, com signature e local
-  de verificação registrados.
-- Não existe "depois eu ligo essa opção". Ou está ligada em código até o efeito
-  no jogo, ou não existe no menu.
-- Antes de dizer pronto: rode o gate e mostre o resultado. Só então declare
-  conclusão.
+Toda alteração estrutural ou correção de subsistema segue o fluxo OpenSpec em `openspec/changes/<nome-da-mudanca>/`:
+1. `proposal.md`: Diagnóstico com evidências (`client.dll` RVAs, logs, reprodução) e escopo da mudança.
+2. `design.md`: Decisões técnicas, invariantes matemáticos e trade-offs.
+3. `specs/<capability>/spec.md`: Requisitos formais (`SHALL`/`MUST`) e cenários (`WHEN`/`THEN`).
+4. `tasks.md`: Checklist rastreável de implementação e verificação via `shogod_tests.exe`.

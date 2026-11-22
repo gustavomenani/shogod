@@ -1,7 +1,7 @@
 // shogod menu host — runs the ImGui menu on a real DX11 swapchain without a
 // game. Used for the visual gate (screenshots) and for iterating on the UI.
 //
-// keys: 1..5 switch tabs, F12 screenshot, ESC quit.
+// keys: 1..6 switch tabs, F12 screenshot, ESC quit.
 
 #include "config/config.hpp"
 #include "engine/log.hpp"
@@ -11,6 +11,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 #ifndef NOMINMAX
@@ -74,10 +75,15 @@ bool create_device(HWND hwnd, ID3D11Device** device, ID3D11DeviceContext** ctx,
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    std::optional<bool> dark_theme;
     for (int i = 1; i < argc; ++i) {
         if (std::wstring(argv[i]) == L"--capture" && i + 1 < argc) {
             g_capture_dir = std::filesystem::path(argv[++i]).string();
             std::filesystem::create_directories(g_capture_dir);
+        } else if (std::wstring(argv[i]) == L"--light") {
+            dark_theme = false;
+        } else if (std::wstring(argv[i]) == L"--dark") {
+            dark_theme = true;
         }
     }
 
@@ -116,6 +122,7 @@ int wmain(int argc, wchar_t** argv) {
 
     shogod::config::store cfg;
     cfg.load(shogod::config::store::default_dir() / "default.json");
+    if (dark_theme.has_value()) cfg.get().ui.dark_theme = *dark_theme;
 
     shogod::ui::menu_state menu;
     menu.open = true;
@@ -123,14 +130,8 @@ int wmain(int argc, wchar_t** argv) {
     menu.tab_anim.fill(1.0f);
 
     shogod::ui::status live;
-    live.fps = 240.0f;
-    live.tick = 128;
-    live.players = 10;
-    live.anchors_ok = 8;
-    live.anchors_total = 8;
-    live.in_game = true;
     live.config_name = "default";
-    live.anchor_detail = "entity system · view matrix · CreateMove · trace · schema — all OK";
+    live.anchor_detail = "Standalone menu host. No game session.";
 
     std::string pending_capture;
     int frame = 0;
@@ -150,12 +151,6 @@ int wmain(int argc, wchar_t** argv) {
             DispatchMessageW(&msg);
         }
 
-        if (GetAsyncKeyState('1') & 1) menu.active = shogod::ui::tab::rage;
-        if (GetAsyncKeyState('2') & 1) menu.active = shogod::ui::tab::visuals;
-        if (GetAsyncKeyState('3') & 1) menu.active = shogod::ui::tab::misc;
-        if (GetAsyncKeyState('4') & 1) menu.active = shogod::ui::tab::configs;
-        if (GetAsyncKeyState('5') & 1) menu.active = shogod::ui::tab::settings;
-
         if (GetAsyncKeyState(VK_F12) & 1 && !g_capture_dir.empty()) {
             const auto path = std::filesystem::path(g_capture_dir) / "manual.png";
             shogod::render::context::capture_backbuffer(device, ctx, swapchain, path.wstring().c_str());
@@ -165,7 +160,11 @@ int wmain(int argc, wchar_t** argv) {
         if (!g_capture_dir.empty()) {
             if (capture_tab < 0 && frame > 4) capture_tab = 0;
             if (capture_tab >= 0 && capture_tab < shogod::ui::k_tab_count) {
-                menu.active = static_cast<shogod::ui::tab>(capture_tab);
+                const auto capture_page = static_cast<shogod::ui::tab>(capture_tab);
+                if (menu.active != capture_page) menu.nav_y = -1.0f;
+                menu.active = capture_page;
+                menu.tab_anim.fill(0.0f);
+                menu.tab_anim[static_cast<std::size_t>(capture_tab)] = 1.0f;
                 if (++capture_wait > 20) {
                     pending_capture = "tab" + std::to_string(capture_tab);
                     capture_wait = 0;
@@ -181,6 +180,16 @@ int wmain(int argc, wchar_t** argv) {
         RECT client{};
         GetClientRect(g_hwnd, &client);
         if (renderer.begin(rtv, static_cast<UINT>(client.right), static_cast<UINT>(client.bottom))) {
+            const auto& io = ImGui::GetIO();
+            live.fps = io.Framerate;
+            if (GetForegroundWindow() == g_hwnd && !io.WantTextInput && g_capture_dir.empty()) {
+                if (ImGui::IsKeyPressed(ImGuiKey_1, false)) menu.active = shogod::ui::tab::rage;
+                if (ImGui::IsKeyPressed(ImGuiKey_2, false)) menu.active = shogod::ui::tab::antiaim;
+                if (ImGui::IsKeyPressed(ImGuiKey_3, false)) menu.active = shogod::ui::tab::visuals;
+                if (ImGui::IsKeyPressed(ImGuiKey_4, false)) menu.active = shogod::ui::tab::misc;
+                if (ImGui::IsKeyPressed(ImGuiKey_5, false)) menu.active = shogod::ui::tab::configs;
+                if (ImGui::IsKeyPressed(ImGuiKey_6, false)) menu.active = shogod::ui::tab::settings;
+            }
             shogod::ui::draw_menu(cfg, menu, live);
             renderer.end();
         }

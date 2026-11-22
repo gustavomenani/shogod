@@ -61,6 +61,8 @@ ImVec4 to_vec4(const config::rgba& c) { return ImVec4(c.r, c.g, c.b, c.a); }
 
 config::rgba from_vec4(const ImVec4& v) { return config::rgba{v.x, v.y, v.z, v.w}; }
 
+ImU32 mix_col(ImU32 a, ImU32 b, float t) { return mix(a, b, t); }
+
 void load_fonts(float scale) {
     g_scale = scale;
     ImGuiIO& io = ImGui::GetIO();
@@ -81,7 +83,15 @@ void load_fonts(float scale) {
     }
 
     ImFontConfig title_cfg = cfg;
-    g_title = io.Fonts->AddFontFromFileTTF(path.c_str(), 21.0f * scale, &title_cfg, ranges);
+    wchar_t windows_dir[MAX_PATH]{};
+    const UINT windows_dir_size = GetWindowsDirectoryW(windows_dir, MAX_PATH);
+    std::filesystem::path title_path = path;
+    if (windows_dir_size > 0 && windows_dir_size < MAX_PATH) {
+        const auto semibold = std::filesystem::path(windows_dir) / "Fonts" / "seguisb.ttf";
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(semibold, ec)) title_path = semibold;
+    }
+    g_title = io.Fonts->AddFontFromFileTTF(title_path.string().c_str(), 29.0f * scale, &title_cfg, ranges);
     if (!g_title) g_title = g_body;
 
     ImFontConfig small_cfg = cfg;
@@ -94,7 +104,7 @@ ImFont* font_title() { return g_title; }
 ImFont* font_small() { return g_small; }
 
 float font_size_body() { return 15.0f * g_scale; }
-float font_size_title() { return 21.0f * g_scale; }
+float font_size_title() { return 29.0f * g_scale; }
 float font_size_small() { return 12.0f * g_scale; }
 
 const palette& colors() { return g_pal; }
@@ -102,40 +112,40 @@ const palette& colors() { return g_pal; }
 void apply_style(const config::rgba& accent_rgba, bool dark) {
     const ImU32 accent = to_u32(accent_rgba);
     const ImU32 accent_hi = mix(accent, IM_COL32(255, 255, 255, 255), 0.18f);
-    const ImU32 accent_dim = mix(accent, IM_COL32(0, 0, 0, 255), 0.25f);
+
 
     if (dark) {
         g_pal = palette{
-            .bg_window = IM_COL32(11, 12, 16, 242),
-            .bg_sidebar = IM_COL32(13, 15, 20, 255),
-            .bg_card = IM_COL32(19, 22, 30, 255),
-            .bg_card_hover = IM_COL32(24, 28, 38, 255),
-            .bg_input = IM_COL32(15, 17, 24, 255),
-            .border = IM_COL32(36, 41, 56, 255),
-            .border_soft = IM_COL32(28, 32, 43, 255),
-            .text = IM_COL32(232, 235, 242, 255),
-            .text_muted = IM_COL32(138, 144, 162, 255),
-            .text_faint = IM_COL32(88, 94, 112, 255),
+            .bg_window = IM_COL32(15, 17, 24, 255),
+            .bg_sidebar = IM_COL32(12, 14, 20, 255),
+            .bg_card = IM_COL32(20, 23, 32, 255),
+            .bg_card_hover = IM_COL32(28, 33, 46, 255),
+            .bg_input = IM_COL32(14, 17, 24, 255),
+            .border = IM_COL32(43, 50, 68, 255),
+            .border_soft = IM_COL32(29, 34, 46, 255),
+            .text = IM_COL32(242, 244, 248, 255),
+            .text_muted = IM_COL32(158, 167, 185, 255),
+            .text_faint = IM_COL32(102, 112, 132, 255),
             .accent = accent,
-            .accent_soft = mix(accent, IM_COL32(0, 0, 0, 255), 0.78f),
+            .accent_soft = mix(IM_COL32(18, 22, 32, 255), accent, 0.22f),
             .success = IM_COL32(69, 212, 131, 255),
             .warning = IM_COL32(245, 181, 68, 255),
             .error = IM_COL32(242, 85, 90, 255),
         };
     } else {
         g_pal = palette{
-            .bg_window = IM_COL32(244, 245, 249, 246),
-            .bg_sidebar = IM_COL32(235, 237, 244, 255),
+            .bg_window = IM_COL32(241, 244, 249, 255),
+            .bg_sidebar = IM_COL32(232, 237, 245, 255),
             .bg_card = IM_COL32(255, 255, 255, 255),
-            .bg_card_hover = IM_COL32(247, 248, 252, 255),
-            .bg_input = IM_COL32(238, 240, 246, 255),
-            .border = IM_COL32(210, 214, 224, 255),
-            .border_soft = IM_COL32(224, 227, 235, 255),
-            .text = IM_COL32(28, 31, 40, 255),
-            .text_muted = IM_COL32(96, 102, 118, 255),
-            .text_faint = IM_COL32(140, 146, 160, 255),
+            .bg_card_hover = IM_COL32(236, 241, 249, 255),
+            .bg_input = IM_COL32(243, 246, 251, 255),
+            .border = IM_COL32(202, 212, 226, 255),
+            .border_soft = IM_COL32(223, 230, 240, 255),
+            .text = IM_COL32(26, 31, 41, 255),
+            .text_muted = IM_COL32(84, 94, 112, 255),
+            .text_faint = IM_COL32(120, 130, 148, 255),
             .accent = accent,
-            .accent_soft = mix(accent, IM_COL32(255, 255, 255, 255), 0.82f),
+            .accent_soft = mix(accent, IM_COL32(255, 255, 255, 255), 0.84f),
             .success = IM_COL32(28, 168, 92, 255),
             .warning = IM_COL32(196, 128, 20, 255),
             .error = IM_COL32(214, 52, 58, 255),
@@ -143,20 +153,22 @@ void apply_style(const config::rgba& accent_rgba, bool dark) {
     }
 
     ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding = 9.0f;
-    s.ChildRounding = 7.0f;
-    s.FrameRounding = 5.0f;
-    s.PopupRounding = 7.0f;
-    s.GrabRounding = 5.0f;
-    s.ScrollbarRounding = 6.0f;
+    s.WindowRounding = 10.0f;
+    s.ChildRounding = 8.0f;
+    s.FrameRounding = 6.0f;
+    s.PopupRounding = 8.0f;
+    s.GrabRounding = 6.0f;
+    s.ScrollbarRounding = 4.0f;
     s.WindowBorderSize = 1.0f;
     s.ChildBorderSize = 1.0f;
+    s.PopupBorderSize = 1.0f;
     s.FrameBorderSize = 0.0f;
     s.WindowPadding = ImVec2(0, 0);
-    s.FramePadding = ImVec2(10, 6);
-    s.ItemSpacing = ImVec2(10, 8);
+    s.FramePadding = ImVec2(10, 5);
+    s.ItemSpacing = ImVec2(10, 6);
+    s.CellPadding = ImVec2(7, 2);
     s.ItemInnerSpacing = ImVec2(6, 5);
-    s.ScrollbarSize = 9.0f;
+    s.ScrollbarSize = 5.0f;
     s.GrabMinSize = 10.0f;
 
     ImVec4* c = s.Colors;
@@ -164,7 +176,7 @@ void apply_style(const config::rgba& accent_rgba, bool dark) {
     c[ImGuiCol_TextDisabled] = ImColor(g_pal.text_faint);
     c[ImGuiCol_WindowBg] = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_ChildBg] = ImColor(g_pal.bg_card);
-    c[ImGuiCol_PopupBg] = ImColor(g_pal.bg_sidebar);
+    c[ImGuiCol_PopupBg] = dark ? ImColor(IM_COL32(19, 22, 31, 255)) : ImColor(g_pal.bg_card);
     c[ImGuiCol_Border] = ImColor(g_pal.border);
     c[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_FrameBg] = ImColor(g_pal.bg_input);
@@ -175,9 +187,9 @@ void apply_style(const config::rgba& accent_rgba, bool dark) {
     c[ImGuiCol_TitleBgCollapsed] = ImColor(g_pal.bg_sidebar);
     c[ImGuiCol_MenuBarBg] = ImColor(g_pal.bg_sidebar);
     c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_ScrollbarGrab] = ImColor(g_pal.border);
-    c[ImGuiCol_ScrollbarGrabHovered] = ImColor(g_pal.text_faint);
-    c[ImGuiCol_ScrollbarGrabActive] = ImColor(g_pal.text_muted);
+    c[ImGuiCol_ScrollbarGrab] = ImColor(g_pal.border_soft);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImColor(g_pal.border);
+    c[ImGuiCol_ScrollbarGrabActive] = ImColor(g_pal.text_faint);
     c[ImGuiCol_CheckMark] = ImColor(accent);
     c[ImGuiCol_SliderGrab] = ImColor(accent);
     c[ImGuiCol_SliderGrabActive] = ImColor(accent_hi);
@@ -199,12 +211,19 @@ void apply_style(const config::rgba& accent_rgba, bool dark) {
     c[ImGuiCol_PlotLines] = ImColor(accent);
     c[ImGuiCol_PlotHistogram] = ImColor(accent);
     c[ImGuiCol_TextSelectedBg] = ImColor(g_pal.accent_soft);
-    c[ImGuiCol_NavHighlight] = ImColor(accent_dim);
+    c[ImGuiCol_NavHighlight] = ImColor(accent);
     c[ImGuiCol_DragDropTarget] = ImColor(accent);
     c[ImGuiCol_TableHeaderBg] = ImColor(g_pal.bg_sidebar);
     c[ImGuiCol_TableBorderStrong] = ImColor(g_pal.border);
     c[ImGuiCol_TableBorderLight] = ImColor(g_pal.border_soft);
     c[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.45f);
+}
+
+ImU32 fade_col(ImU32 col, float extra_alpha) {
+    const float a_mul = std::clamp(ImGui::GetStyle().Alpha * extra_alpha, 0.0f, 1.0f);
+    const std::uint32_t orig_a = (col >> IM_COL32_A_SHIFT) & 0xFFu;
+    const std::uint32_t new_a = static_cast<std::uint32_t>(static_cast<float>(orig_a) * a_mul);
+    return (col & ~(0xFFu << IM_COL32_A_SHIFT)) | (new_a << IM_COL32_A_SHIFT);
 }
 
 void text_soft(const char* text, ImU32 color) {
@@ -214,11 +233,11 @@ void text_soft(const char* text, ImU32 color) {
 }
 
 void separator_y(float pad) {
-    ImGui::Dummy(ImVec2(0, pad * 0.5f));
-    ImGui::PushStyleColor(ImGuiCol_Separator, colors().border_soft);
-    ImGui::Separator();
-    ImGui::PopStyleColor();
-    ImGui::Dummy(ImVec2(0, pad * 0.5f));
+    ImGui::Dummy(ImVec2(0, pad * 0.35f));
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float w = std::max(40.0f, ImGui::GetContentRegionAvail().x - 14.0f);
+    ImGui::GetWindowDrawList()->AddLine(p, ImVec2(p.x + w, p.y), fade_col(colors().border_soft));
+    ImGui::Dummy(ImVec2(0, pad * 0.35f));
 }
 
 }  // namespace shogod::ui

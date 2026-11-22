@@ -1,0 +1,14 @@
+## Context
+O `shogod` compila em C++20 MSVC x64 com `/MT` (`MultiThreaded`) e mantém separação entre `shogod_core` (lógica pura testável em host sem o jogo) e `shogod.dll` (hooks MinHook, DX11, schemas e chamadas nativas do CS2). O `reverie src` utiliza `libprotobuf.lib` compilado com `/MD`, incompatível diretamente com `/MT`.
+
+## Decisions
+1. **Protobuf zero-dependency (`/MT`)**: Em vez de linkar `libprotobuf.lib` (`/MD`), `src/sdk/usercmd.hpp/.cpp` modela o layout exato de `CUserCommand`, `CInButtonState`, `CSGOUserCmdPB`, `CBaseUserCmdPB`, `CSGOInputHistoryEntryPB`, `CSubtickMoveStepPB` e `CMsgQAnglePB`, usando os helpers nativos da própria `client.dll` (`create_subtick_move` e `add_element_to_rep_field_container`) para alocação segura na arena protobuf do jogo.
+2. **Resolução dinâmica de anchors/interfaces**: Remover `k_recorded_image_size` de `signatures.cpp` e `trace.cpp`. Todos os hooks e helpers usam `pattern::find` + `resolve_rel32` + `CreateInterface`.
+3. **Hook unificado de `CreateMove` (`vtable[5]`) + `SendMove`**: `CreateMove` executa coleta de snapshot na game thread, `AntiAim`, `Movement::Rotation` (movement fix), movimento, `Ragebot` (scan de lag records + autowall + hitchance + recoil + escrita em `input_history[0]` e `subtick_moves`), enquanto `SendMove` preserva `current_move_data.viewangles` para isolar a câmera local.
+4. **LagCompensation & Hitboxes reais**: Hooks em `FrameStage` (`Source2Client::vtable[36]`) e `UpdateHitboxHistory` alimentam os lag records com `CHitboxTransformHistory`; durante o `AutoWall` (`ClipTraceToPlayer` + `TraceBullet`), `CLagRecordScope` aplica temporariamente o override de matrizes do record avaliado. Se `UpdateHitboxHistory` não tiver capturado o alvo ainda, há fallback seguro para os bones/matrizes atuais do `CSkeletonInstance`.
+5. **Chams in-game (`ColoredModels`)**: Hooks em `AnimatableSceneObjectDesc::vtable[4]` (`GeneratePrimitives`), `SortPrimitives`, `RenderLayerDrawList`, `CullSceneObjects`, `TestScenePvs`, `DrawScenePrimitive` e `DrawOccludedDx11`/`DrawOccludedSoftware` geram materiais via `KV3::LoadKV3` + `CMaterialSystem::CreateMaterial` com `PassRole` (`Occluded` / `Original` / `Visible`) e depth stencil invertido para `Ignore-Z` sem culling de PVS.
+6. **Compatibilidade de Config & UI**: `config_v1` preserva campos antigos (`player_chams`, `rage.weapons[]`) e adiciona os novos campos de chams por categoria, silent aim, remove recoil, auto revolver, force baim, peek assist e world modulation.
+
+## Risks / Trade-offs
+- **Offsets de `Impl_` protobuf**: Dependem do layout compilado do protobuf do CS2 (verificado contra `cs_usercmd.pb.h` / `usercmd.pb.h` da build atual); protegidos por SEH e `static_assert` onde aplicável, além de validação em runtime de ponteiros e `input_history_size`.
+- **Múltiplos hooks MinHook em `scenesystem`/`rendersystemdx11`**: Todos os hooks ficam concentrados em `hooks.cpp` com rollback limpo no unload.

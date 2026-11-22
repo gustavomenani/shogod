@@ -2,24 +2,21 @@
 
 namespace shogod::sdk {
 
-publisher::publisher() { published_.store(&buffers_[0], std::memory_order_release); }
-
 void publisher::publish() noexcept {
-    const int index = write_index_.load(std::memory_order_relaxed);
-    frame_snapshot& out = buffers_[index];
-    out.seq += 2;  // even = stable, odd never observed by the reader
-
-    published_.store(&out, std::memory_order_release);
-    write_index_.store(1 - index, std::memory_order_relaxed);
+    std::lock_guard lock(mutex_);
+    frame_snapshot& frame = buffers_[write_index_];
+    frame.seq = published_ ? published_->seq + 2u : 2u;
+    published_ = &frame;
+    write_index_ = 1 - write_index_;
 }
 
-const frame_snapshot* publisher::acquire() const noexcept {
-    const frame_snapshot* frame = published_.load(std::memory_order_acquire);
-    if (frame == nullptr) return nullptr;
-    if ((frame->seq & 1u) != 0u) return nullptr;
-    if (frame->count < 0 || frame->count > k_max_players) return nullptr;
-    if (!frame->view_matrix.finite()) return nullptr;
-    return frame;
+std::optional<frame_snapshot> publisher::acquire() const noexcept {
+    std::lock_guard lock(mutex_);
+    if (published_ == nullptr || published_->count < 0 ||
+        published_->count > k_max_players || !published_->view_matrix.finite()) {
+        return std::nullopt;
+    }
+    return *published_;
 }
 
 }  // namespace shogod::sdk

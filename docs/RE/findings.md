@@ -373,18 +373,101 @@ escreve 16 floats nesse intervalo por frame e confirmar com leitura de
 `obj + off` durante o jogo (valores finitos, `w` coerente, muda com a câmera).
 Vtable tem 23 slots; o slot 17 é um getter de float em `+0x1cd0`.
 
-### 8.6 Sonda de runtime da view matrix (resultado negativo registrado)
+### 8.6 Sonda de runtime da view matrix + resolução via `CViewRender` slot 4 (`0x255ce50`)
 
-Sonda em jogo (`viewprobe`, presente em `src/engine/hooks.cpp`) leu o objeto
-`CViewRender` (`base+0x256afa0`, vtable confere) e varreu 16 floats alinhados
-em `[0x20, 0x1d60)` procurando forma de world-to-clip (coluna 3 das linhas
-0..2 ≈ 0, linha w não nula, finitos).
+Sonda inicial em `CViewRender` (`base+0x256afa0`) não achou matriz plana em `[0x20, 0x1d60)` porque o cálculo de projeção escreve em um **array global de `VMatrix` fora do objeto**.
 
-Resultado: **6 candidatos, todos lixo** (offsets `0xdc..0x190`, valores
--1/0/1 e um `-25738.4`). Nenhum bloco de matriz no objeto com essa forma.
+Desmontagem de `CViewRender::vtable[4]` (`0x180c0b000`) e do leitor W2S `0x180c104e5`:
+- `0x180c0b078`: `lea rcx, [rip + 0x1951dd1]` -> `0x18255ce50` (passado como `worldToProjection` para `0x1803b6c00` junto com `0x18255cdd0` `worldToView` e `0x18255ce10` `viewToProjection`).
+- `0x180c104e5` (leitor W2S `0x180c10520`): `48 63 08 48 8D 05 ?? ?? ?? ?? 48 C1 E1 06 48 03 C8` -> 1 hit único no binário, `rip` @+3 len 7 -> **RVA `0x255ce50`** (`dwViewMatrix`, stride `0x40` por splitscreen slot, row-major 4×4 compatível com `math::mat4::world_to_screen`).
 
-Conclusão: a matriz não está embutida como 4x4 plano nesse intervalo, ou está
-em convenção coluna-maior, ou o objeto guarda um ponteiro para `CViewSetup` /
-matriz em outro global. Próximo passo (curto): relaxar o filtro para as duas
-convenções e seguir ponteiros do objeto; alternativa é achar o writer por
-xref do slot 17 (`float em +0x1cd0`) e subir até o cálculo de projeção.
+### 8.7 Schema runtime (`schemasystem.dll` + `SchemaClassInfoData_t`)
+
+- `ISchemaSystem::FindTypeScopeForModule("client.dll", nullptr)` = `vtable[12]` (`0x60`).
+- `CSchemaSystemTypeScope::FindDeclaredClass(&out, name)` = `vtable[2]` (`0x1800162b0`, despacha para `vtable[25]` `0x180010380`).
+- Layout verificado em `client.dll` (`.data` `0x18222ba90` `C_CSPlayerPawn` e `0x1821e8f80` `C_BaseEntity`):
+  - `+0x08`: `const char* m_pszName`
+  - `+0x24`: `int16_t m_nFieldCount`
+  - `+0x29`: `uint8_t m_nBaseClassesCount`
+  - `+0x30`: `SchemaClassFieldData_t*` (stride `0x20`: `+0x00` `name`, `+0x10` `int32_t offset`)
+  - `+0x38`: `SchemaBaseClassInfoData_t*` (stride `0x10`: `+0x00` `uint32_t offset`, `+0x08` `SchemaClassInfoData_t*`)
+
+### 8.8 Tick real em partida — `CCSGOInput::vtable[4]` (não `vtable[7]`)
+
+Sonda Frida em partida offline (dust2 com bots), na build pinada:
+
+| Alvo | Resultado |
+|---|---|
+| `client.dll+0xb781e0` (`vtable[7]`, candidato antigo) | **0 hits em 7 s** |
+| `client.dll+0xb782c0` (thunk `jmp [input_vtable+0x38]`) | **0 hits em 7 s** |
+| `client.dll+0xb723c0` (builder de comando) | ~100 hits/s |
+| `client.dll+0xcfd7c0` (`vtable[4]`) | por tick; `count 0 → 1`, ângulos válidos |
+
+Backtrace do builder: `vtable[4] (0xcfd7c0) → 0xb723c0`. Portanto `vtable[4]` é o
+update de input por tick que produz o `CUserCmd`; `vtable[7]` só é alcançado no
+front-end. O cheat passa a hookar `vtable[4]` **depois** do original, então o
+ragebot/antiaim escrevem no comando que o jogo vai consumir.
+
+### 8.9 `CUserCmd` — máscaras de botão
+
+- `cmd+0x00` = máscara final de botões (held): o builder em `0xb7286c` grava
+  `(~[rbp-0x19] & [rbp-0x21]) | [rbp-0x11]` nesse campo.
+- `cmd+0x08` / `cmd+0x10` = acumuladores por fonte (subtick), não o estado lido pelo gameplay.
+- Verificação em partida: segurando ESPAÇO, o campo `+0x00` do comando mais novo
+  passa a `0x2` (`IN_JUMP`); o cheat limpa o bit quando no ar (bhop) e o campo
+  sai `0x0` — prova de que a escrita pós-builder sobrevive no comando.
+- Escrita em `cmd+0x430` após o builder altera a câmera em partida (antiaim
+  com pitch 89 visível no jogo), confirmando o timing.
+
+### 8.10 `CModelState` — array de bones
+
+Dump de `m_modelState` (`scene_node + schema_offset("m_modelState")`, offset 0x140 nesta build):
+
+| Offset | Conteúdo |
+|---|---|
+| `+0x80` | `CBoneData*` — array world-space, stride `0x20` (`float pos[3]; float scale; float quat[4]`) |
+| `+0x88` | segundo array (transforms), não é contagem |
+| `+0x90` | capacidade (ex. `0x6f` = 111) |
+| `+0x94` | contagem de bones em uso (ex. `0x5e` = 94 em modelo T; `86` em CT) |
+
+Bone 0 é o root nos pés (posição == `m_vecAbsOrigin`). Índices CS2 provados por
+geometria em dois modelos: `0` root, `1` pelvis, `2..4` espinha, `5` neck,
+`6` head, `8..11` braço esquerdo (clavícula/braço/antebraço/mão), `12..15` braço
+direito, `17/18/19` perna esquerda (coxa/joelho/tornozelo), `20/21/22` perna
+direita. O mapa antigo (CS:GO, 22/23/24/25/26/27) está errado nesta build.
+
+### 8.11 Trace de visibilidade — `CGamePhysicsQueryInterface::TraceShape`
+
+Chamável de dentro do processo, na game thread (validado com Frida e depois no DLL):
+
+| Item | Valor |
+|---|---|
+| global do contexto | `client+0x221ab18` → ponteiro para `client+0x253cab0` (BSS) |
+| validação | `ctx != null && *(void**)ctx != null` (o `m_pQuery` é escrito no init da física) |
+| função | `client+0xa15360`, assinatura `bool(ctx, shape*, start*, end*, filter*, trace*)` |
+| shape | buffer de 0x30–0x40; os primeiros 16 bytes vêm do helper `client+0x203570` |
+| filtro | objeto de 0x48 bytes: vtable `client+0x1ad05d8`, `+0x08 = 0x18000`, `+0x30 = 0x0F00FFFF00000000` |
+| `CGameTrace` | 0xc0 bytes; `fraction` float em `+0xac`; retorno `true` = houve hit |
+
+O filtro foi isolado por bisseção sobre um filtro real do jogo: zerar `+0x30`
+faz todo trace retornar "sem hit" (o `+0x37 = 0x0F` dentro desse qword é o flag
+que liga o trace contra o mundo). `ShouldHitEntity` da vtable retorna `true`.
+
+Erros de implementação corrigidos durante a verificação:
+- começar o raio no olho do player fazia o trace bater no próprio hitbox
+  (fraction 0); o raio começa 24 unidades à frente.
+- terminar o raio no centro do bone fazia o trace bater no corpo do alvo;
+  o fim recua 12 unidades.
+
+Em partida o ragebot agora reporta `blocked=N` para alvos atrás de parede e só
+considera candidatos com LOS limpo.
+
+### 8.12 Filtro que ignora uma entidade (wallbang)
+
+O filtro do trace pode ser nosso: a vtable é consultada só no slot 1
+(`ShouldHitEntity(this, entity)`, `client+0x1ad05d8+8`). Um filtro próprio com
+`vtable[0]` = destrutor do jogo e `vtable[1]` = handler que compara o ponteiro do
+alvo guardado em `+0x10` permite medir a espessura da cobertura com dois raios
+(near/far). Verificado em partida: `near=0.111 far=0.099 thickness=2913.9` para
+parede grossa (negado), sem crash; o alvo é de fato ignorado (o hit do raio
+reverso fica além do corpo).

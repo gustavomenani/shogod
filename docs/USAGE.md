@@ -1,63 +1,58 @@
-# SHOGOD — uso
+# shogod — Guia de Compilação, Uso e Operação
 
-## Build
+## 1. Pré-requisitos
 
-```
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64
+- **SO**: Windows 10 ou Windows 11 x64
+- **Toolchain**: Visual Studio 2022 / Build Tools com workload *Desktop development with C++* (MSVC v143/v145 x64 + CMake)
+- **Target**: Counter-Strike 2 (`cs2.exe`, DirectX 11)
+
+---
+
+## 2. Compilação e Testes
+
+```powershell
+# 1. Gerar solução CMake x64
+cmake -B build -A x64
+
+# 2. Compilar todos os alvos em Release
 cmake --build build --config Release
+
+# 3. Executar a suíte de testes unitários e E2E
+.\build\tests\Release\shogod_tests.exe
 ```
 
-Saídas em `build/Release/`:
+Artefatos compilados:
+- `build\Release\shogod.dll`
+- `build\Release\shogod_loader.exe`
+- `build\tests\Release\shogod_tests.exe`
 
-| Arquivo | Papel |
-|---|---|
-| `shogod.dll` | cheat (injetado no `cs2.exe`) |
-| `shogod_loader.exe` | injeta/ejecta a DLL |
-| `shogod_host.exe` | host standalone do menu (sem jogo), `--capture <dir>` gera PNGs |
-| `tests/Release/shogod_tests.exe` | suite de unidade (37 testes) |
+---
 
-`fonts/` precisa ficar ao lado da DLL (o `shogod.dll` carrega `fonts/Inter-Medium.ttf`).
+## 3. Injeção e Controles em Jogo
 
-## Injeção
+Para uso em ambiente de teste local, inicie o CS2 com `-insecure`:
 
-Alvo: servidor comunitário HvH / partida offline com bots. **Não** é para VAC.
-
-```
-shogod_loader.exe                 # acha cs2.exe e injeta build\Release\shogod.dll
-shogod_loader.exe --wait 60       # espera o processo subir
-shogod_loader.exe --unload        # FreeLibrary remoto (restaura hooks no detach)
-shogod_loader.exe --dll <path> --process <nome.exe>
+```powershell
+.\build\Release\shogod_loader.exe --process cs2.exe --dll .\build\Release\shogod.dll
 ```
 
-- Injeção padrão: `CreateRemoteThread(LoadLibraryW)` com o caminho da DLL.
-- Manual-map não faz parte do pacote; o loader e o `DllMain` assumem carga por
-  `LoadLibrary`, e o unload depende de `DllMain(DLL_PROCESS_DETACH)` para
-  remover hooks em ordem inversa. Quem for adicionar manual-map precisa
-  implementar: mapeamento de seções/relocs/TLS, resolver imports, chamar
-  `DllMain` com `DLL_PROCESS_ATTACH`, e um export explícito de unload — porque
-  sem `FreeLibrary` o detach não acontece sozinho.
+### Atalhos Principais
+- **`INSERT`** (configurável na aba `Settings`): Abre/fecha o menu ImGui (salva `default.json` automaticamente ao fechar).
+- **`END`**: Descarrega (`unload`) o módulo com restauração limpa de todos os hooks (`MinHook`), `WndProc` e recursos D3D11.
 
-## Operação
+### Estrutura das 6 Abas do Menu
+1. **RageBot**: Ativação global, Silent Aim, FOV, prioridade de alvo, Backtrack (`ms`), Auto-Wall e configuração detalhada por grupo de arma ou arma específica (`Min Damage`, `Hitchance`, `Multipoint`, `Safe Point`, `Hitboxes`, `Auto-Stop`, `Auto-Scope`, `Delay Shot`).
+2. **Anti-Aim**: Pitch (`Off`, `Down`, `Up`, `Zero`), Yaw (`Off`, `Backward`, `Jitter`, `Random`), `Yaw Offset`, `Jitter Range`, `At Targets`, `Freestanding`, `Auto-Adjust`, `On Move`, `On Air`, `Safe Manual Fire`.
+3. **Visuals**: ESP de inimigos (Box, Health, Armor, Name, Weapon Icon/Text, Ammo, Flags, Skeleton, Head Dot, Offscreen Arrows, Sound ESP, Backtrack Ghost), Chams (`Enemy Visible`, `Enemy XQZ`, `Team`, `Local`, `Arms`, `Weapon`, `Scope Blend`), World/Light Modulation, Third-Person, Camera FOV, Removals (`No Flash`, `No Smoke`, `No Scope`, `Remove View Punch`) e Penetration Crosshair.
+4. **Misc**: `BunnyHop` (com bind `Hold`/`Toggle`), `Auto-Strafe` (com bind `Hold`/`Toggle`), `Edge Jump`, `Peek Assist`, `Slide Walk` (`Leg Movement`), `Auto-Pistol` e `Safe Mode`.
+5. **Configs**: Gerenciamento completo de perfis JSON (`Create`, `Load`, `Save`, `Duplicate`, `Delete`, `Import/Export Clipboard`).
+6. **Settings**: Keybind do menu, escala de DPI, cor de destaque (`Accent`) e telemetria dos hooks/anchors.
 
-- `INSERT` abre/fecha o menu (configurável em Config → Settings; salvo no JSON).
-- Com o menu aberto, o `WndProc` engole mouse/teclado do jogo; ao fechar, o
-  input volta na mesma sessão.
-- Configs: `%APPDATA%\shogod\configs\<nome>.json` (salvar/carregar na aba Config).
-- Logs: `%APPDATA%\shogod\logs\shogod-YYYYMMDD.log` (prefixo `[shogod]`), com
-  `OK`/`FAIL` por anchor no init.
+---
 
-## Diagnóstico rápido
+## 4. Diretórios de Configuração e Diagnóstico
 
-| Sintoma | Causa provável / ação |
-|---|---|
-| Menu não aparece, jogo continua | log sem `private vtable ... installed`: swapchain não encontrado (janela errada) ou `Present` não foi chamado ainda |
-| Jogo fecha ao injetar | log mostra até onde foi; se parar em `hooks: bootstrap`, olhar o `.mdmp` mais novo em `game/bin/win64` |
-| `anchors: x/3 OK` | ler a linha do anchor que falhou; feature dependente fica desligada |
-| ESP desalinhado | view matrix/projeção; ver `docs/RE/findings.md` §8.6 (ainda pendente) |
-| Texto do menu gigante/pequeno | `ui_scale` do host; no jogo a fonte é carregada do diretório da DLL |
-
-## Estado de features
-
-Features em jogo (ESP, ragebot, antiaim, misc) dependem de SDK (view matrix +
-schema). O que está verificado hoje: injeção, hooks, menu, config e o
-`CreateMove` com dados válidos. Ver `docs/PLAN.md` §1 para a ordem pendente.
+Todos os arquivos de execução ficam em `%APPDATA%\shogod\`:
+- `%APPDATA%\shogod\configs\default.json`
+- `%APPDATA%\shogod\logs\shogod-YYYYMMDD.log`
+- `%APPDATA%\shogod\crashes\`

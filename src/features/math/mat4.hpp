@@ -23,6 +23,11 @@ struct mat4 {
         return true;
     }
 
+    bool usable_projection() const {
+        return finite() &&
+               (m[3][0] != 0.0f || m[3][1] != 0.0f || m[3][2] != 0.0f || m[3][3] > 0.001f);
+    }
+
     // World -> screen. Returns false for points behind the camera, on a
     // degenerate w, or when the projection lands outside a sane range.
     bool world_to_screen(const vec3& world, int screen_w, int screen_h, vec2& out) const {

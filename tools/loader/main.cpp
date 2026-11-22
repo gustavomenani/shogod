@@ -17,9 +17,6 @@
 #endif
 #include <windows.h>
 #include <TlHelp32.h>
-#include <psapi.h>
-
-#pragma comment(lib, "psapi.lib")
 
 namespace {
 
@@ -60,7 +57,8 @@ bool inject(DWORD pid, const std::wstring& dll) {
         return false;
     }
 
-    if (!WriteProcessMemory(process, remote, dll.c_str(), bytes, nullptr)) {
+    SIZE_T written = 0;
+    if (!WriteProcessMemory(process, remote, dll.c_str(), bytes, &written) || written != bytes) {
         std::wprintf(L"loader: WriteProcessMemory failed (%lu)\n", GetLastError());
         VirtualFreeEx(process, remote, 0, MEM_RELEASE);
         CloseHandle(process);
@@ -79,68 +77,28 @@ bool inject(DWORD pid, const std::wstring& dll) {
         return false;
     }
 
-    WaitForSingleObject(thread, 15000);
-    DWORD module_base = 0;
-    GetExitCodeThread(thread, &module_base);
+    const DWORD wait = WaitForSingleObject(thread, 15000);
+    if (wait != WAIT_OBJECT_0) {
+        std::wprintf(L"loader: remote load is unconfirmed (wait=%lu); path buffer remains mapped\n", wait);
+        CloseHandle(thread);
+        CloseHandle(process);
+        return false;
+    }
+    DWORD load_result = 0;
+    const bool got_result = GetExitCodeThread(thread, &load_result) != FALSE;
     CloseHandle(thread);
     VirtualFreeEx(process, remote, 0, MEM_RELEASE);
     CloseHandle(process);
 
-    if (module_base == 0) {
+    if (!got_result) {
+        std::wprintf(L"loader: remote load exited but the result could not be read\n");
+        return false;
+    }
+    if (load_result == 0) {
         std::wprintf(L"loader: LoadLibrary returned NULL — check the DLL dependencies\n");
         return false;
     }
-    std::wprintf(L"loader: injected, module base 0x%08lx\n", module_base);
-    return true;
-}
-
-bool eject(DWORD pid, const wchar_t* dll_name) {
-    HANDLE process = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
-                                     PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
-                                 FALSE, pid);
-    if (!process) {
-        std::wprintf(L"loader: OpenProcess failed (%lu)\n", GetLastError());
-        return false;
-    }
-
-    HMODULE modules[1024]{};
-    DWORD needed = 0;
-    if (!EnumProcessModulesEx(process, modules, sizeof modules, &needed, LIST_MODULES_ALL)) {
-        std::wprintf(L"loader: EnumProcessModulesEx failed (%lu)\n", GetLastError());
-        CloseHandle(process);
-        return false;
-    }
-
-    HMODULE target = nullptr;
-    const DWORD count = needed / sizeof(HMODULE);
-    for (DWORD i = 0; i < count && i < 1024; ++i) {
-        wchar_t name[MAX_PATH]{};
-        if (GetModuleBaseNameW(process, modules[i], name, MAX_PATH) &&
-            _wcsicmp(name, dll_name) == 0) {
-            target = modules[i];
-            break;
-        }
-    }
-
-    if (!target) {
-        std::wprintf(L"loader: %s not loaded\n", dll_name);
-        CloseHandle(process);
-        return false;
-    }
-
-    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-    auto free_library = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-        GetProcAddress(kernel, "FreeLibrary"));
-    HANDLE thread = CreateRemoteThread(process, nullptr, 0, free_library, target, 0, nullptr);
-    if (!thread) {
-        std::wprintf(L"loader: CreateRemoteThread(FreeLibrary) failed (%lu)\n", GetLastError());
-        CloseHandle(process);
-        return false;
-    }
-    WaitForSingleObject(thread, 15000);
-    CloseHandle(thread);
-    CloseHandle(process);
-    std::wprintf(L"loader: ejected\n");
+    std::wprintf(L"loader: LoadLibrary completed; check the runtime log for hook initialization\n");
     return true;
 }
 
@@ -167,6 +125,10 @@ int wmain(int argc, wchar_t** argv) {
         else if (wcscmp(argv[i], L"--wait") == 0 && i + 1 < argc) wait_seconds = _wtoi(argv[++i]);
     }
 
+    if (unload) {
+        std::wprintf(L"loader: hooks remain mapped until the game exits; restart the game to unload\n");
+        return 1;
+    }
     if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::wprintf(L"loader: dll not found: %s\n", dll.c_str());
         return 1;
@@ -183,6 +145,6 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     std::wprintf(L"loader: pid %lu, dll %s\n", pid, dll.c_str());
-    const bool ok = unload ? eject(pid, L"shogod.dll") : inject(pid, dll);
+    const bool ok = inject(pid, dll);
     return ok ? 0 : 1;
 }

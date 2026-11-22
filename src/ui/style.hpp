@@ -44,6 +44,8 @@ ImVec4 to_vec4(const config::rgba& c);
 config::rgba from_vec4(const ImVec4& v);
 
 // Drawing helpers shared by menu and widgets.
+[[nodiscard]] ImU32 fade_col(ImU32 col, float extra_alpha = 1.0f);
+[[nodiscard]] ImU32 mix_col(ImU32 a, ImU32 b, float t);
 void text_soft(const char* text, ImU32 color = 0);
 void separator_y(float pad = 8.0f);
 

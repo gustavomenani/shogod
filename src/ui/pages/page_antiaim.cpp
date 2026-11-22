@@ -1,0 +1,68 @@
+#include "ui/pages/pages.hpp"
+
+#include "ui/widgets.hpp"
+
+namespace shogod::ui::pages {
+namespace {
+
+using namespace widgets;
+
+const char* const k_yaw_modes[] = {"Off", "Jitter", "Random", "Static backward"};
+const char* const k_pitch_modes[] = {"Off", "Down", "Up", "Zero"};
+
+}  // namespace
+
+void antiaim(config::store& cfg) {
+    using namespace config;
+    config_v1& c = cfg.get();
+
+    if (!begin_columns("##aa_cols")) return;
+
+    ImGui::TableNextColumn();
+    section("Angles");
+    if (begin_card("##aa_angles", ImVec2(0, 0))) {
+        toggle("Enabled", &c.anti_aim.enabled, "Real view angles isolated from camera via SendMove");
+        toggle("At targets", &c.anti_aim.at_targets,
+               "Aims base yaw relative to the nearest enemy instead of your camera");
+        toggle("Auto adjust", &c.anti_aim.auto_adjust,
+               "Automatically trims yaw offset for weapon stance and pose so your head stays centered");
+        toggle("Auto direction", &c.anti_aim.freestanding,
+               "Tucks your head toward adjacent wall cover relative to the nearest enemy");
+
+        constexpr pitch_mode pitches[] = {pitch_mode::off, pitch_mode::down, pitch_mode::up,
+                                          pitch_mode::zero};
+        int pitch_sel = 0;
+        for (int i = 0; i < 4; ++i) {
+            if (pitches[i] == c.anti_aim.base_pitch) pitch_sel = i;
+        }
+        if (combo("Pitch", &pitch_sel, k_pitch_modes, 4)) c.anti_aim.base_pitch = pitches[pitch_sel];
+
+        constexpr yaw_mode modes[] = {yaw_mode::off, yaw_mode::jitter, yaw_mode::random,
+                                      yaw_mode::fake_static};
+        int selected = 0;
+        for (int i = 0; i < 4; ++i) {
+            if (modes[i] == c.anti_aim.base_yaw) selected = i;
+        }
+        if (combo("Yaw base", &selected, k_yaw_modes, 4)) c.anti_aim.base_yaw = modes[selected];
+        slider_float_step("Yaw offset", &c.anti_aim.yaw_offset, -180.0f, 180.0f,
+                          "Fine yaw adjustment in degrees");
+        if (c.anti_aim.base_yaw == yaw_mode::jitter || c.anti_aim.base_yaw == yaw_mode::random)
+            slider_float_step("Jitter range", &c.anti_aim.jitter_range, 0.0f, 180.0f,
+                              "Yaw offset magnitude for jitter and random");
+    }
+    end_card();
+
+    ImGui::TableNextColumn();
+    section("Conditions");
+    if (begin_card("##aa_cond", ImVec2(0, 0))) {
+        toggle("Safe manual fire", &c.anti_aim.on_shot,
+               "Aligns to crosshair strictly on the tick a manual gunshot fires; holds steady between shots");
+        toggle("Enable in air", &c.anti_aim.on_air);
+        toggle("Enable while moving", &c.anti_aim.on_move);
+    }
+    end_card();
+
+    end_columns();
+}
+
+}  // namespace shogod::ui::pages

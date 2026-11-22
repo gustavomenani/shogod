@@ -1,50 +1,72 @@
 #include "features/backtrack.hpp"
 
+#include <cmath>
+
 namespace shogod::features {
 
 void backtrack_history::reset() {
+    std::lock_guard lock(mutex_);
     records_ = {};
     next_ = {};
 }
 
 void backtrack_history::push(int player_index, const sdk::player_snapshot& player, float curtime) {
-    if (player_index < 0 || player_index >= sdk::k_max_players) return;
+    if (player_index < 0 || player_index > sdk::k_max_players || player.pawn_handle == 0) return;
     if (!player.alive || player.bone_count <= 0 || player.bone_count > sdk::k_max_bones) return;
-    if (!player.origin.finite()) return;
+    if (!player.origin.finite() || !std::isfinite(curtime) || curtime < 0.0f) return;
 
-    const int slot = next_[static_cast<std::size_t>(player_index)]++ % k_max_records;
+    std::lock_guard lock(mutex_);
+    auto& next = next_[static_cast<std::size_t>(player_index)];
+    const int prev_slot = (next + k_max_records - 1) % k_max_records;
+    const backtrack_record& last =
+        records_[static_cast<std::size_t>(player_index)][static_cast<std::size_t>(prev_slot)];
+    if (last.pawn_handle == player.pawn_handle && std::fabs(curtime - last.curtime) < 0.01f) {
+        return;
+    }
+
+    const int slot = next;
+    next = (next + 1) % k_max_records;
     backtrack_record& rec =
         records_[static_cast<std::size_t>(player_index)][static_cast<std::size_t>(slot)];
 
     rec = {};
-    rec.valid = true;
+    rec.pawn_handle = player.pawn_handle;
     rec.curtime = curtime;
     rec.bone_count = player.bone_count;
     rec.origin = player.origin;
     for (int i = 0; i < player.bone_count; ++i) rec.bones[i] = player.bones[i];
 }
 
-const backtrack_record* backtrack_history::best(int player_index, float window_ms,
-                                                float now) const {
-    if (player_index < 0 || player_index >= sdk::k_max_players) return nullptr;
-    if (window_ms <= 0.0f) return nullptr;
+std::optional<backtrack_record> backtrack_history::best(int player_index, std::uint32_t pawn_handle,
+                                                              float window_ms, float now) const {
+    if (player_index < 0 || player_index > sdk::k_max_players || pawn_handle == 0) {
+        return std::nullopt;
+    }
+    if (!std::isfinite(window_ms) || window_ms <= 0.0f || !std::isfinite(now)) {
+        return std::nullopt;
+    }
 
+    std::lock_guard lock(mutex_);
+
+    // Show the oldest pose still inside the configured display window.
     const float window = window_ms / 1000.0f;
     const backtrack_record* best = nullptr;
     for (const backtrack_record& rec : records_[static_cast<std::size_t>(player_index)]) {
-        if (!rec.valid) continue;
+        if (rec.pawn_handle != pawn_handle) continue;
         const float age = now - rec.curtime;
         if (age < 0.0f || age > window) continue;
-        if (best == nullptr || rec.curtime > best->curtime) best = &rec;
+        if (best == nullptr || rec.curtime < best->curtime) best = &rec;
     }
-    return best;
+    if (best == nullptr) return std::nullopt;
+    return *best;
 }
 
 int backtrack_history::record_count(int player_index) const {
-    if (player_index < 0 || player_index >= sdk::k_max_players) return 0;
+    if (player_index < 0 || player_index > sdk::k_max_players) return 0;
+    std::lock_guard lock(mutex_);
     int count = 0;
     for (const backtrack_record& rec : records_[static_cast<std::size_t>(player_index)]) {
-        if (rec.valid) ++count;
+        if (rec.pawn_handle != 0) ++count;
     }
     return count;
 }

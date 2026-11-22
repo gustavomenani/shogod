@@ -1,6 +1,10 @@
 #include "engine/render/dx11.hpp"
 
 #include "engine/log.hpp"
+#include "ui/brand_logo.hpp"
+#include "ui/menu.hpp"
+#include "ui/preview/preview.hpp"
+#include "ui/user_avatar.hpp"
 
 #include <wincodec.h>
 
@@ -15,17 +19,38 @@
 
 namespace shogod::render {
 
+namespace {
+
+bool upload_rgba_texture(ID3D11Device* device, const std::uint8_t* rgba, int w, int h,
+                         ID3D11Texture2D** out_tex, ID3D11ShaderResourceView** out_srv) {
+    if (!device || !rgba || w <= 0 || h <= 0 || !out_tex || !out_srv) return false;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = static_cast<UINT>(w);
+    td.Height = static_cast<UINT>(h);
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA init_data{};
+    init_data.pSysMem = rgba;
+    init_data.SysMemPitch = static_cast<UINT>(w * 4);
+    if (FAILED(device->CreateTexture2D(&td, &init_data, out_tex))) return false;
+    if (FAILED(device->CreateShaderResourceView(*out_tex, nullptr, out_srv))) {
+        (*out_tex)->Release();
+        *out_tex = nullptr;
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 bool context::init(ID3D11Device* device, ID3D11DeviceContext* device_context, HWND hwnd,
                    float ui_scale) {
     if (ready_) return true;
     if (!device || !device_context || !hwnd) return false;
-
-    device_ = device;
-    ctx_ = device_context;
-    hwnd_ = hwnd;
-    scale_ = ui_scale;
-    device_->AddRef();
-    ctx_->AddRef();
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -36,14 +61,34 @@ bool context::init(ID3D11Device* device, ID3D11DeviceContext* device_context, HW
 
     if (!ImGui_ImplWin32_Init(hwnd)) {
         shogod::log::error("ui: ImGui_ImplWin32_Init failed");
+        ImGui::DestroyContext();
         return false;
     }
     if (!ImGui_ImplDX11_Init(device, device_context)) {
         shogod::log::error("ui: ImGui_ImplDX11_Init failed");
         ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
         return false;
     }
 
+    device_ = device;
+    ctx_ = device_context;
+    hwnd_ = hwnd;
+    scale_ = ui_scale;
+    device_->AddRef();
+    ctx_->AddRef();
+
+    if (upload_rgba_texture(device_, ui::k_brand_logo_rgba, ui::k_brand_logo_w, ui::k_brand_logo_h,
+                            &brand_tex_, &brand_srv_)) {
+        ui::set_brand_logo(reinterpret_cast<ImTextureID>(brand_srv_), ui::k_brand_logo_w,
+                           ui::k_brand_logo_h);
+    }
+    if (upload_rgba_texture(device_, ui::k_user_avatar_rgba, ui::k_user_avatar_size,
+                            ui::k_user_avatar_size, &avatar_tex_, &avatar_srv_)) {
+        ui::set_user_avatar(reinterpret_cast<ImTextureID>(avatar_srv_), ui::k_user_avatar_size);
+    }
+
+    ui::preview::shared_panel().init(device, device_context);
     ready_ = true;
     shogod::log::info("ui: DX11 surface up (scale {:.2f})", ui_scale);
     return true;
@@ -100,13 +145,27 @@ void context::end() {
     restore_state();
 }
 
-void context::invalidate() {
-    if (!ready_) return;
-    ImGui_ImplDX11_InvalidateDeviceObjects();
-}
-
 void context::shutdown() {
     if (!ready_) return;
+    ui::set_brand_logo(0, 0, 0);
+    ui::set_user_avatar(0, 0);
+    if (avatar_srv_) {
+        avatar_srv_->Release();
+        avatar_srv_ = nullptr;
+    }
+    if (avatar_tex_) {
+        avatar_tex_->Release();
+        avatar_tex_ = nullptr;
+    }
+    if (brand_srv_) {
+        brand_srv_->Release();
+        brand_srv_ = nullptr;
+    }
+    if (brand_tex_) {
+        brand_tex_->Release();
+        brand_tex_ = nullptr;
+    }
+    ui::preview::shared_panel().shutdown();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

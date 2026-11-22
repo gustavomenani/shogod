@@ -13,6 +13,10 @@ struct state {
     config::store cfg;
     ui::menu_state menu;
     ui::status live;
+    sdk::publisher snap_pub;
+    sdk::anchors anchors{};
+    sdk::netvars netvars{};
+    features::backtrack_history backtrack;
     std::chrono::steady_clock::time_point frame_start = std::chrono::steady_clock::now();
     int frames = 0;
     std::chrono::steady_clock::time_point window_start = std::chrono::steady_clock::now();
@@ -30,15 +34,22 @@ void init() {
     log::info("runtime: {} ready", brand::version_tag());
 }
 
-void shutdown() {
-    if (!g_state) return;
-    g_state->cfg.save(config::store::default_dir() / "default.json");
-    g_state.reset();
-}
-
 config::store& cfg() { return g_state->cfg; }
- ui::menu_state& menu() { return g_state->menu; }
+ui::menu_state& menu() { return g_state->menu; }
 ui::status& live() { return g_state->live; }
+sdk::publisher& snapshot_publisher() { return g_state->snap_pub; }
+const sdk::anchors& anchors() { return g_state->anchors; }
+void set_anchors(const sdk::anchors& a) {
+    if (g_state) g_state->anchors = a;
+}
+const sdk::netvars& netvars() { return g_state->netvars; }
+void set_netvars(const sdk::netvars& nv) {
+    if (g_state) {
+        g_state->netvars = nv;
+        g_state->live.no_flash_available = nv.cs_pawn_flash_overlay_alpha > 0;
+    }
+}
+features::backtrack_history& backtrack() { return g_state->backtrack; }
 
 void frame_tick() {
     if (!g_state) return;
@@ -49,6 +60,13 @@ void frame_tick() {
         g_state->live.fps = static_cast<float>(g_state->frames) / elapsed;
         g_state->frames = 0;
         g_state->window_start = now;
+    }
+
+    if (const auto snap = g_state->snap_pub.acquire()) {
+        g_state->live.in_game = snap->in_game;
+        g_state->live.tick = snap->tick;
+        g_state->live.players = snap->count;
+        g_state->live.view_matrix_ready = snap->view_matrix.usable_projection();
     }
 }
 

@@ -29,10 +29,6 @@ public:
     [[nodiscard]] ID3D11Device* device() const noexcept { return device_; }
     [[nodiscard]] ID3D11DeviceContext* device_context() const noexcept { return ctx_; }
 
-    // Device loss: drop backend objects; the caller recreates the device and
-    // calls invalidate() then a fresh init() path on the new device.
-    void invalidate();
-
     // Writes the swapchain back buffer to a PNG. Used by the visual gate.
     static bool capture_backbuffer(ID3D11Device* device, ID3D11DeviceContext* device_context,
                                    IDXGISwapChain* swapchain, const wchar_t* path);
@@ -44,6 +40,10 @@ private:
     ID3D11Device* device_ = nullptr;
     ID3D11DeviceContext* ctx_ = nullptr;
     HWND hwnd_ = nullptr;
+    ID3D11Texture2D* brand_tex_ = nullptr;
+    ID3D11ShaderResourceView* brand_srv_ = nullptr;
+    ID3D11Texture2D* avatar_tex_ = nullptr;
+    ID3D11ShaderResourceView* avatar_srv_ = nullptr;
     bool ready_ = false;
 
     struct saved {
