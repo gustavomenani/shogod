@@ -35,6 +35,7 @@ set(SHOGOD_CORE_SOURCES
     src/features/math/hitbox_geom.cpp
     src/features/math/hitchance.cpp
     src/config/config.cpp
+    src/config/keybinds.cpp
     src/sdk/snapshot.cpp
     src/features/backtrack.cpp
     src/features/rage/target.cpp

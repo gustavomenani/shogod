@@ -1,5 +1,6 @@
 #include "ui/widgets.hpp"
 
+#include "config/keybinds.hpp"
 #include "ui/style.hpp"
 #include "ui/ui_icons.hpp"
 
@@ -21,9 +22,80 @@ namespace {
 
 std::unordered_map<ImGuiID, float> g_anim;
 
+config::config_v1* g_bind_cfg = nullptr;
+std::string g_bind_popup_target;
+bool g_bind_popup_open_req = false;
+int g_bind_capture_index = -1;
+bool g_bind_capture_armed = false;
+
 constexpr float card_pad = 14.0f;
 constexpr float row_height = 26.0f;
 constexpr float field_width = 148.0f;
+
+int count_binds_for(const char* bind_id, int& first_vk) noexcept {
+    first_vk = 0;
+    if (!g_bind_cfg || !bind_id || bind_id[0] == '\0') return 0;
+    int count = 0;
+    for (const auto& kb : g_bind_cfg->keybinds) {
+        if (kb.target == bind_id) {
+            if (count == 0) first_vk = kb.vk;
+            ++count;
+        }
+    }
+    return count;
+}
+
+void draw_bind_badge_and_rc(const char* bind_id, ImVec2 row_min, ImVec2 row_max) {
+    if (!g_bind_cfg || !bind_id || bind_id[0] == '\0') return;
+    int first_vk = 0;
+    const int n = count_binds_for(bind_id, first_vk);
+
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const bool over_row = mouse.x >= row_min.x && mouse.x <= row_max.x &&
+                          mouse.y >= row_min.y && mouse.y <= row_max.y &&
+                          ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    if (over_row && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        g_bind_popup_target = bind_id;
+        g_bind_popup_open_req = true;
+        g_bind_capture_index = -1;
+    }
+
+    if (n <= 0) return;
+
+    char badge[24]{};
+    if (n == 1) {
+        const std::string k = config::vk_short_name(first_vk);
+        std::snprintf(badge, sizeof badge, "%s", k.c_str());
+    } else {
+        std::snprintf(badge, sizeof badge, "%d binds", n);
+    }
+
+    const float badge_x = ImGui::GetItemRectMax().x + 6.0f;
+    ImGui::PushFont(font_small(), 10.5f);
+    const ImVec2 bsz = ImGui::CalcTextSize(badge);
+    const float pw = bsz.x + 10.0f;
+    const float ph = 15.0f;
+    const ImVec2 p0(badge_x, row_min.y + (row_height - ph) * 0.5f);
+    const ImVec2 p1(p0.x + pw, p0.y + ph);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p0, p1, fade_col(colors().accent_soft), 4.0f);
+    dl->AddRect(p0, p1, fade_col(colors().accent, 0.7f), 4.0f);
+    dl->AddText(ImVec2(p0.x + 5.0f, p0.y + (ph - bsz.y) * 0.5f), fade_col(colors().accent), badge);
+    ImGui::PopFont();
+}
+
+int poll_any_vk_press() noexcept {
+    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) return -1;
+    constexpr int k_mouse_vks[] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2};
+    for (int vk : k_mouse_vks) {
+        if ((GetAsyncKeyState(vk) & 0x8000) != 0) return vk;
+    }
+    for (int vk = 0x08; vk <= 0xFE; ++vk) {
+        if (vk == VK_ESCAPE || vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) continue;
+        if ((GetAsyncKeyState(vk) & 0x8000) != 0) return vk;
+    }
+    return 0;
+}
 
 void align_control(float width) {
     ImGui::SameLine();
@@ -117,9 +189,12 @@ void draw_checkmark(ImDrawList* dl, ImVec2 center, ImU32 col) {
     draw_ui_icon(*dl, ui_icon_id::check, center, 13.0f, col, 1.55f);
 }
 
-bool draw_toggle(const char* label, bool* value, const char* tooltip) {
+bool draw_toggle(const char* label, bool* value, const char* tooltip, const char* bind_id) {
     ImGui::PushID(label);
+    const ImVec2 row_min = ImGui::GetCursorScreenPos();
+    const float row_w = ImGui::GetContentRegionAvail().x;
     label_text(label);
+    draw_bind_badge_and_rc(bind_id, row_min, ImVec2(row_min.x + row_w, row_min.y + row_height));
     align_control(34.0f);
 
     const ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -154,9 +229,12 @@ bool draw_toggle(const char* label, bool* value, const char* tooltip) {
 }
 
 bool draw_slider(const char* label, float* value, float lo, float hi, const char* tooltip,
-                 bool integer, bool hp_over_100 = false) {
+                 bool integer, bool hp_over_100 = false, const char* bind_id = nullptr) {
     ImGui::PushID(label);
+    const ImVec2 row_min = ImGui::GetCursorScreenPos();
+    const float row_w = ImGui::GetContentRegionAvail().x;
     label_text(label);
+    draw_bind_badge_and_rc(bind_id, row_min, ImVec2(row_min.x + row_w, row_min.y + row_height));
     align_control(field_width);
 
     if (integer) {
@@ -233,9 +311,12 @@ bool draw_slider(const char* label, float* value, float lo, float hi, const char
 }
 
 bool select_trigger(const char* label, const char* preview, bool muted_preview, const char* tooltip,
-                    ImVec2* out_pos, float* out_w, float* out_h) {
+                    ImVec2* out_pos, float* out_w, float* out_h, const char* bind_id = nullptr) {
+    const ImVec2 row_min = ImGui::GetCursorScreenPos();
+    const float row_w = ImGui::GetContentRegionAvail().x;
     label_text(label);
     if (tooltip) tip(tooltip);
+    draw_bind_badge_and_rc(bind_id, row_min, ImVec2(row_min.x + row_w, row_min.y + row_height));
     align_control(field_width);
 
     const ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -384,39 +465,42 @@ void tip(const char* text) {
     }
 }
 
-bool toggle(const char* label, bool* value, const char* tooltip) {
-    return draw_toggle(label, value, tooltip);
+bool toggle(const char* label, bool* value, const char* tooltip, const char* bind_id) {
+    return draw_toggle(label, value, tooltip, bind_id);
 }
 
-bool slider_float(const char* label, float* value, float lo, float hi, const char* tooltip) {
-    return draw_slider(label, value, lo, hi, tooltip, false, false);
+bool slider_float(const char* label, float* value, float lo, float hi, const char* tooltip,
+                  const char* bind_id) {
+    return draw_slider(label, value, lo, hi, tooltip, false, false, bind_id);
 }
 
-bool slider_float_step(const char* label, float* value, float lo, float hi, const char* tooltip) {
-    return draw_slider(label, value, lo, hi, tooltip, true, false);
+bool slider_float_step(const char* label, float* value, float lo, float hi, const char* tooltip,
+                       const char* bind_id) {
+    return draw_slider(label, value, lo, hi, tooltip, true, false, bind_id);
 }
 
-bool slider_min_damage(const char* label, float* value, const char* tooltip) {
-    return draw_slider(label, value, 1.0f, 120.0f, tooltip, true, true);
+bool slider_min_damage(const char* label, float* value, const char* tooltip, const char* bind_id) {
+    return draw_slider(label, value, 1.0f, 120.0f, tooltip, true, true, bind_id);
 }
 
-bool slider_int(const char* label, int* value, int lo, int hi, const char* tooltip) {
+bool slider_int(const char* label, int* value, int lo, int hi, const char* tooltip,
+                const char* bind_id) {
     float v = static_cast<float>(*value);
     const bool changed = draw_slider(label, &v, static_cast<float>(lo), static_cast<float>(hi),
-                                     tooltip, true);
+                                     tooltip, true, false, bind_id);
     *value = static_cast<int>(v);
     return changed;
 }
 
 bool combo(const char* label, int* value, const char* const* items, int count,
-           const char* tooltip, combo_icon draw_icon) {
+           const char* tooltip, combo_icon draw_icon, const char* bind_id) {
     ImGui::PushID(label);
     const std::string preview =
         draw_icon ? std::string("       ") + items[*value] : items[*value];
     ImVec2 trig_pos{};
     float trig_w = 0.0f;
     float trig_h = 0.0f;
-    select_trigger(label, preview.c_str(), false, tooltip, &trig_pos, &trig_w, &trig_h);
+    select_trigger(label, preview.c_str(), false, tooltip, &trig_pos, &trig_w, &trig_h, bind_id);
     if (draw_icon) {
         draw_icon(*ImGui::GetWindowDrawList(),
                   ImVec2(trig_pos.x + 17.0f, trig_pos.y + trig_h * 0.5f), *value,
@@ -714,6 +798,173 @@ void end_card() {
 
     ImGui::PopID();
     ImGui::Dummy(ImVec2(0, 6.0f));
+}
+
+void set_active_bind_store(config::config_v1* cfg) noexcept { g_bind_cfg = cfg; }
+
+void open_keybind_popup(const char* bind_id) {
+    if (!bind_id || bind_id[0] == '\0') return;
+    g_bind_popup_target = bind_id;
+    g_bind_popup_open_req = true;
+    g_bind_capture_index = -1;
+}
+
+void render_keybind_popup() {
+    if (!g_bind_cfg) return;
+    if (g_bind_popup_open_req) {
+        ImGui::OpenPopup("##nl_bind_popup");
+        g_bind_popup_open_req = false;
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, fade_col(colors().bg_window));
+    ImGui::PushStyleColor(ImGuiCol_Border, fade_col(colors().border));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(276.0f, 0.0f), ImVec2(320.0f, 420.0f));
+
+    if (ImGui::BeginPopup("##nl_bind_popup")) {
+        const config::bind_target_spec* spec = config::find_bind_target(g_bind_popup_target);
+        if (!spec) {
+            ImGui::TextDisabled("Target unavailable");
+            ImGui::EndPopup();
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleVar(3);
+            return;
+        }
+
+        ImGui::PushFont(font_body(), font_size_body());
+        ImGui::TextUnformatted(spec->label);
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::PushFont(font_small(), font_size_small());
+        ImGui::TextDisabled("(%s)", spec->category);
+        ImGui::PopFont();
+        ImGui::Separator();
+
+        int remove_idx = -1;
+        int match_count = 0;
+        const char* k_modes[] = {"Toggle", "Hold", "Always"};
+
+        for (std::size_t i = 0; i < g_bind_cfg->keybinds.size(); ++i) {
+            auto& kb = g_bind_cfg->keybinds[i];
+            if (kb.target != g_bind_popup_target) continue;
+            ++match_count;
+            ImGui::PushID(static_cast<int>(i));
+
+            const bool capturing = (g_bind_capture_index == static_cast<int>(i));
+            if (capturing) {
+                const int vk = poll_any_vk_press();
+                if (!g_bind_capture_armed) {
+                    if (vk == 0) g_bind_capture_armed = true;
+                } else if (vk == -1) {
+                    kb.vk = 0;
+                    g_bind_capture_index = -1;
+                } else if (vk > 0) {
+                    if (vk != g_bind_cfg->ui.menu_key) kb.vk = vk;
+                    g_bind_capture_index = -1;
+                }
+            }
+
+            const std::string key_lbl =
+                capturing ? "Press a key..." : ("Key: " + config::vk_name(kb.vk));
+            if (ImGui::Button(key_lbl.c_str(), ImVec2(142.0f, 24.0f))) {
+                g_bind_capture_index = static_cast<int>(i);
+                g_bind_capture_armed = false;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(82.0f);
+            int mode_i = static_cast<int>(kb.mode);
+            if (ImGui::Combo("##mode", &mode_i, k_modes, 3)) {
+                kb.mode = static_cast<config::bind_mode>(mode_i);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("X", ImVec2(24.0f, 24.0f))) {
+                remove_idx = static_cast<int>(i);
+            }
+
+            // Override value control matching target type
+            switch (spec->kind) {
+                case config::bind_value_kind::boolean: {
+                    bool ov_on = kb.override_value >= 0.5f;
+                    if (ImGui::Checkbox("Override -> Enable", &ov_on)) {
+                        kb.override_value = ov_on ? 1.0f : 0.0f;
+                    }
+                    break;
+                }
+                case config::bind_value_kind::min_damage: {
+                    int iv = std::clamp(static_cast<int>(std::lround(kb.override_value)), 1, 120);
+                    char fmt[24]{};
+                    if (iv > 100) std::snprintf(fmt, sizeof fmt, "HP+%d", iv - 100);
+                    else std::snprintf(fmt, sizeof fmt, "%d dmg", iv);
+                    ImGui::SetNextItemWidth(258.0f);
+                    if (ImGui::SliderInt("##ov_dmg", &iv, 1, 120, fmt)) {
+                        kb.override_value = static_cast<float>(iv);
+                    }
+                    break;
+                }
+                case config::bind_value_kind::integer: {
+                    int iv = std::clamp(static_cast<int>(std::lround(kb.override_value)),
+                                        static_cast<int>(spec->min_val),
+                                        static_cast<int>(spec->max_val));
+                    ImGui::SetNextItemWidth(258.0f);
+                    if (ImGui::SliderInt("##ov_int", &iv, static_cast<int>(spec->min_val),
+                                         static_cast<int>(spec->max_val))) {
+                        kb.override_value = static_cast<float>(iv);
+                    }
+                    break;
+                }
+                case config::bind_value_kind::choice: {
+                    int cv = std::clamp(static_cast<int>(std::lround(kb.override_value)), 0,
+                                        std::max(0, spec->choice_count - 1));
+                    ImGui::SetNextItemWidth(258.0f);
+                    if (spec->choices && ImGui::Combo("##ov_ch", &cv, spec->choices, spec->choice_count)) {
+                        kb.override_value = static_cast<float>(cv);
+                    }
+                    break;
+                }
+                case config::bind_value_kind::floating:
+                default: {
+                    ImGui::SetNextItemWidth(258.0f);
+                    ImGui::SliderFloat("##ov_fl", &kb.override_value, spec->min_val, spec->max_val,
+                                       "%.0f");
+                    break;
+                }
+            }
+
+            ImGui::Checkbox("Show on Keybinds", &kb.show_in_binds);
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+
+        if (remove_idx >= 0) {
+            g_bind_cfg->keybinds.erase(g_bind_cfg->keybinds.begin() + remove_idx);
+            g_bind_capture_index = -1;
+        }
+        if (match_count == 0) {
+            ImGui::TextDisabled("No keybinds attached yet.");
+        }
+
+        if (g_bind_cfg->keybinds.size() < config::k_max_menu_keybinds &&
+            ImGui::Button("+ Add bind", ImVec2(258.0f, 26.0f))) {
+            config::menu_keybind fresh{};
+            fresh.target = spec->id;
+            fresh.vk = 0;
+            fresh.mode = config::bind_mode::toggle;
+            fresh.show_in_binds = true;
+            fresh.override_value = spec->default_override;
+            g_bind_cfg->keybinds.push_back(std::move(fresh));
+            g_bind_capture_index = static_cast<int>(g_bind_cfg->keybinds.size()) - 1;
+            g_bind_capture_armed = false;
+        }
+
+        ImGui::EndPopup();
+    } else {
+        g_bind_capture_index = -1;
+    }
+
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
 }
 
 }  // namespace shogod::ui::widgets

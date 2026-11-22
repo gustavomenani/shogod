@@ -9,7 +9,9 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace shogod::config {
 
@@ -317,10 +319,21 @@ struct misc_cfg {
     bool block_server_detected = false;
 };
 
+// --------------------------------------------------------------- keybinds ----
+enum class bind_mode : int { toggle = 0, hold = 1, always = 2 };
+
+struct menu_keybind {
+    std::string target;
+    int vk = 0;  // Windows VK code (0 = unbound unless mode == always)
+    bind_mode mode = bind_mode::toggle;
+    bool show_in_binds = true;
+    float override_value = 1.0f;
+};
+
 // --------------------------------------------------------------------- ui ----
 struct ui_cfg {
     bool dark_theme = true;
-    rgba accent{0.15f, 0.55f, 0.60f, 1.0f};
+    rgba accent{0.31f, 0.49f, 1.0f, 1.0f};  // Neverlose electric blue
     int menu_key = 0x2D;  // VK_INSERT
     float opacity = 0.97f;
     bool animations = true;
@@ -334,6 +347,7 @@ struct config_v1 {
     visuals_cfg visuals{};
     misc_cfg misc{};
     ui_cfg ui{};
+    std::vector<menu_keybind> keybinds{};
 };
 
 void apply_safe_profile(config_v1& cfg);

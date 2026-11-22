@@ -15,6 +15,7 @@
 
 #include "config/bind_state.hpp"
 #include "config/config.hpp"
+#include "config/keybinds.hpp"
 #include "features/aaa/antiaim.hpp"
 #include "features/backtrack.hpp"
 #include "features/createmove.hpp"
@@ -2982,4 +2983,71 @@ TEST(hvh_e2e, subtick_autostrafe_with_antiaim_locked_yaw_and_subframes) {
 
     EXPECT_EQ(aa_mismatch, 0);
     EXPECT_GT(std::hypot(vel.x, vel.y), 350.0f);
+}
+
+TEST(hvh_e2e, bhop_landing_subtick_prediction_eliminates_ground_stick_and_universal_binds_override) {
+    // 1. Simulate a falling trajectory crossing z = 0 mid-tick (so FL_ONGROUND is still 0 at tick start).
+    // predict_landing_subtick_frac must detect the exact landing tick and return a valid subtick frac in (0, 1).
+    float z = 18.0f;
+    float vz = -120.0f;
+    constexpr float k_dt = 1.0f / 64.0f;
+    constexpr float k_g = 800.0f;
+    int predicted_landing_tick = -1;
+    float predicted_when = -1.0f;
+    int actual_ground_tick = -1;
+
+    for (int t = 0; t < 16; ++t) {
+        const float frac = features::predict_landing_subtick_frac(z, vz, k_g);
+        if (frac >= 0.0f && predicted_landing_tick < 0) {
+            predicted_landing_tick = t;
+            predicted_when = frac;
+        }
+        const float next_z = z + vz * k_dt - 0.5f * k_g * k_dt * k_dt;
+        vz -= k_g * k_dt;
+        z = next_z;
+        if (z <= 0.0f && actual_ground_tick < 0) {
+            actual_ground_tick = t;
+            break;
+        }
+    }
+
+    ASSERT_GE(actual_ground_tick, 0);
+    EXPECT_EQ(predicted_landing_tick, actual_ground_tick);
+    EXPECT_GT(predicted_when, 0.0f);
+    EXPECT_LT(predicted_when, 1.0f);
+
+    // 2. Verify universal Neverlose keybind overrides drive live Anti-Aim & Ragebot resolution.
+    config::config_v1 base{};
+    base.anti_aim.enabled = true;
+    base.anti_aim.base_yaw = config::yaw_mode::fake_static;
+    base.anti_aim.yaw_offset = 0.0f;
+    base.anti_aim.auto_adjust = false;
+    base.rage.weapons[static_cast<std::size_t>(config::weapon_group::scout)].min_damage = 101.0f;
+
+    base.keybinds.push_back({"aa.yaw_offset", 0x5A, config::bind_mode::toggle, true, -90.0f});
+    base.keybinds.push_back({"rage.min_damage", 0x56, config::bind_mode::hold, true, 10.0f});
+
+    bool key_z = false;
+    bool key_v = false;
+    auto read_key = [&](int vk) noexcept { return (vk == 0x5A) ? key_z : ((vk == 0x56) ? key_v : false); };
+
+    config::keybind_runtime rt;
+    rt.poll(base.keybinds, read_key, true, 0x2D);  // arm
+    key_z = true;
+    key_v = true;
+    rt.poll(base.keybinds, read_key, true, 0x2D);  // activate both
+
+    config::config_v1 eff = base;
+    std::vector<config::active_bind_display> hud;
+    rt.apply_overrides(eff, base.keybinds, &hud);
+
+    features::antiaim_context ctx{};
+    ctx.command_number = 900;
+    const math::angles base_aa = features::apply_antiaim_full(base.anti_aim, {0.0f, 0.0f}, ctx);
+    const math::angles eff_aa = features::apply_antiaim_full(eff.anti_aim, {0.0f, 0.0f}, ctx);
+    EXPECT_NEAR(math::yaw_delta(base_aa.yaw, eff_aa.yaw), -90.0f, 0.5f);
+
+    const auto& scout = eff.rage.resolve_weapon(40, static_cast<int>(config::weapon_group::scout));
+    EXPECT_FLOAT_EQ(scout.min_damage, 10.0f);
+    EXPECT_EQ(hud.size(), 2u);
 }

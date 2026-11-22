@@ -115,19 +115,20 @@ void apply_style(const config::rgba& accent_rgba, bool dark) {
 
 
     if (dark) {
+        // Authentic Neverlose dark navy palette (adapted from OverlayMenu menu_palette.h).
         g_pal = palette{
-            .bg_window = IM_COL32(15, 17, 24, 255),
-            .bg_sidebar = IM_COL32(12, 14, 20, 255),
-            .bg_card = IM_COL32(20, 23, 32, 255),
-            .bg_card_hover = IM_COL32(28, 33, 46, 255),
-            .bg_input = IM_COL32(14, 17, 24, 255),
-            .border = IM_COL32(43, 50, 68, 255),
-            .border_soft = IM_COL32(29, 34, 46, 255),
+            .bg_window = IM_COL32(11, 13, 20, 255),
+            .bg_sidebar = IM_COL32(7, 17, 31, 255),
+            .bg_card = IM_COL32(17, 19, 29, 255),
+            .bg_card_hover = IM_COL32(25, 29, 44, 255),
+            .bg_input = IM_COL32(9, 12, 20, 255),
+            .border = IM_COL32(38, 45, 68, 255),
+            .border_soft = IM_COL32(25, 30, 46, 255),
             .text = IM_COL32(242, 244, 248, 255),
-            .text_muted = IM_COL32(158, 167, 185, 255),
-            .text_faint = IM_COL32(102, 112, 132, 255),
+            .text_muted = IM_COL32(162, 170, 188, 255),
+            .text_faint = IM_COL32(104, 114, 136, 255),
             .accent = accent,
-            .accent_soft = mix(IM_COL32(18, 22, 32, 255), accent, 0.22f),
+            .accent_soft = mix(IM_COL32(14, 22, 38, 255), accent, 0.25f),
             .success = IM_COL32(69, 212, 131, 255),
             .warning = IM_COL32(245, 181, 68, 255),
             .error = IM_COL32(242, 85, 90, 255),

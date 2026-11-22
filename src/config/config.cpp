@@ -1,6 +1,7 @@
 #include "config/config.hpp"
 
 #include "brand.hpp"
+#include "config/keybinds.hpp"
 #include "engine/log.hpp"
 
 #include <algorithm>
@@ -602,6 +603,25 @@ void clamp_all_impl(config_v1& cfg, int& clamps) {
     cfg.misc.hitsound.body_kill = clampi("misc.hitsound.body_kill", cfg.misc.hitsound.body_kill, 0, 18, clamps);
     cfg.misc.hitsound.head_hit = clampi("misc.hitsound.head_hit", cfg.misc.hitsound.head_hit, 0, 18, clamps);
     cfg.misc.hitsound.head_kill = clampi("misc.hitsound.head_kill", cfg.misc.hitsound.head_kill, 0, 18, clamps);
+    if (cfg.keybinds.size() > k_max_menu_keybinds) {
+        cfg.keybinds.resize(k_max_menu_keybinds);
+        ++clamps;
+    }
+    for (auto& kb : cfg.keybinds) {
+        if (kb.vk < 0 || kb.vk > 254) {
+            kb.vk = 0;
+            ++clamps;
+        }
+        const int mode_i = clampi("keybinds.mode", static_cast<int>(kb.mode), 0, 2, clamps);
+        kb.mode = static_cast<bind_mode>(mode_i);
+        if (const bind_target_spec* spec = find_bind_target(kb.target)) {
+            kb.override_value = clampf("keybinds.override_value", kb.override_value,
+                                       spec->min_val, spec->max_val, clamps);
+        } else if (!std::isfinite(kb.override_value)) {
+            kb.override_value = 0.0f;
+            ++clamps;
+        }
+    }
     cfg.ui.opacity = clampf("ui.opacity", cfg.ui.opacity, 0.2f, 1.0f, clamps);
 }
 
@@ -714,6 +734,20 @@ bool store::from_json(std::string_view text) {
         cfg_.ui.opacity = get_or<float>(u, "opacity", cfg_.ui.opacity);
         cfg_.ui.animations = get_or<bool>(u, "animations", cfg_.ui.animations);
     }
+    if (doc.contains("keybinds") && doc["keybinds"].is_array()) {
+        cfg_.keybinds.clear();
+        for (const auto& item : doc["keybinds"]) {
+            if (!item.is_object() || cfg_.keybinds.size() >= k_max_menu_keybinds) continue;
+            menu_keybind kb{};
+            kb.target = get_or<std::string>(item, "target", "");
+            if (kb.target.empty() || !find_bind_target(kb.target)) continue;
+            kb.vk = get_or<int>(item, "vk", 0);
+            kb.mode = static_cast<bind_mode>(get_or<int>(item, "mode", 0));
+            kb.show_in_binds = get_or<bool>(item, "show_in_binds", true);
+            kb.override_value = get_or<float>(item, "override_value", 1.0f);
+            cfg_.keybinds.push_back(std::move(kb));
+        }
+    }
 
     clamp_all();
     return true;
@@ -773,8 +807,20 @@ std::string store::to_json() const {
         {"opacity", cfg_.ui.opacity},
         {"animations", cfg_.ui.animations},
     };
+    json kb_arr = json::array();
+    for (const auto& kb : cfg_.keybinds) {
+        kb_arr.push_back(json{
+            {"target", kb.target},
+            {"vk", kb.vk},
+            {"mode", static_cast<int>(kb.mode)},
+            {"show_in_binds", kb.show_in_binds},
+            {"override_value", kb.override_value},
+        });
+    }
+    doc["keybinds"] = std::move(kb_arr);
     json saved = impl_->doc.is_object() ? impl_->doc : json::object();
     overlay_profile(saved, doc);
+    saved["keybinds"] = doc["keybinds"];
     if (saved.contains("rage") && saved["rage"].is_object() &&
         saved["rage"].contains("weapon_overrides") && saved["rage"]["weapon_overrides"].is_object()) {
         // Drop cleared overrides while preserving unknown future weapon keys.

@@ -185,10 +185,11 @@ int wmain(int argc, wchar_t** argv) {
             if (GetForegroundWindow() == g_hwnd && !io.WantTextInput && g_capture_dir.empty()) {
                 if (ImGui::IsKeyPressed(ImGuiKey_1, false)) menu.active = shogod::ui::tab::rage;
                 if (ImGui::IsKeyPressed(ImGuiKey_2, false)) menu.active = shogod::ui::tab::antiaim;
-                if (ImGui::IsKeyPressed(ImGuiKey_3, false)) menu.active = shogod::ui::tab::visuals;
-                if (ImGui::IsKeyPressed(ImGuiKey_4, false)) menu.active = shogod::ui::tab::misc;
-                if (ImGui::IsKeyPressed(ImGuiKey_5, false)) menu.active = shogod::ui::tab::configs;
-                if (ImGui::IsKeyPressed(ImGuiKey_6, false)) menu.active = shogod::ui::tab::settings;
+                if (ImGui::IsKeyPressed(ImGuiKey_3, false)) menu.active = shogod::ui::tab::players;
+                if (ImGui::IsKeyPressed(ImGuiKey_4, false)) menu.active = shogod::ui::tab::world;
+                if (ImGui::IsKeyPressed(ImGuiKey_5, false)) menu.active = shogod::ui::tab::misc;
+                if (ImGui::IsKeyPressed(ImGuiKey_6, false)) menu.active = shogod::ui::tab::configs;
+                if (ImGui::IsKeyPressed(ImGuiKey_7, false)) menu.active = shogod::ui::tab::keybinds;
             }
             shogod::ui::draw_menu(cfg, menu, live);
             renderer.end();

@@ -374,44 +374,100 @@ void run_createmove(std::uintptr_t csgo_input, const sdk::anchors& anchors,
         valid_move_type;
     bool bhop_do_jump = false;
     if (bhop_active) {
-        if (state.bhop_jumped_cmd == cmd->command_number) {
-            bhop_do_jump = true;
-        } else if (next_jump_frac < 1.0f) {
-            const bool landing_predicted =
-                on_ground || (last_landed_tick >= 0 && last_landed_frac >= 0.0f && last_landed_frac < 1.0f);
-            if (landing_predicted && jump_held) {
-                bhop_do_jump = step_bhop(state.bhop, cmd->command_number, true, true);
-                if (bhop_do_jump) {
-                    state.bhop_jumped_cmd = cmd->command_number;
-                    state.bhop_jumped_when =
-                        std::clamp(std::max(last_landed_frac, next_jump_frac), 0.0f, 0.96f);
-                }
-            } else {
-                bhop_do_jump = step_bhop(state.bhop, cmd->command_number, on_ground, jump_held);
-                if (bhop_do_jump) {
-                    state.bhop_jumped_cmd = cmd->command_number;
-                    state.bhop_jumped_when = std::clamp(next_jump_frac, 0.0f, 0.96f);
+        // Predict mid-tick ground contact while descending so BunnyHop fires PressJump
+        // at the exact landing subtick inside this command instead of sticking for 1 tick.
+        float predicted_land_frac = -1.0f;
+        if (!on_ground && jump_held && has_velocity && local_vel.z < -1.0f &&
+            sdk::trace_ready() && frame.local_origin.finite()) {
+            float sv_grav = 800.0f;
+            sdk::read_cvar_float(anchors.cvar, "sv_gravity", sv_grav);
+            float grav_scale = 1.0f;
+            if (nv.ent_gravity_scale != 0) safe_read(frame.local_pawn + nv.ent_gravity_scale, grav_scale);
+            const float eff_grav = sv_grav * (std::isfinite(grav_scale) && grav_scale > 0.0f ? grav_scale : 1.0f);
+            constexpr float k_dt = 1.0f / 64.0f;
+            const float fall_max = (-local_vel.z) * k_dt + 0.5f * eff_grav * k_dt * k_dt + 3.0f;
+            const float trace_len = fall_max + 2.0f;
+
+            constexpr float k_hull_off[5][2] = {
+                {0.0f, 0.0f}, {13.5f, 13.5f}, {-13.5f, 13.5f}, {13.5f, -13.5f}, {-13.5f, -13.5f}
+            };
+            float min_dist = trace_len + 1.0f;
+            for (const auto& off : k_hull_off) {
+                const float s[3] = {frame.local_origin.x + off[0], frame.local_origin.y + off[1],
+                                    frame.local_origin.z + 2.0f};
+                const float e[3] = {frame.local_origin.x + off[0], frame.local_origin.y + off[1],
+                                    frame.local_origin.z + 2.0f - trace_len};
+                float frac = 1.0f;
+                if (sdk::trace_fraction_skip(s, e, reinterpret_cast<void*>(frame.local_pawn), frac) &&
+                    std::isfinite(frac) && frac >= 0.0f && frac < 1.0f) {
+                    const float dist = std::max(0.0f, frac * trace_len - 2.0f);
+                    min_dist = std::min(min_dist, dist);
                 }
             }
+            if (min_dist <= fall_max) {
+                predicted_land_frac = predict_landing_subtick_frac(min_dist, local_vel.z, eff_grav);
+            }
+        }
+
+        const bool has_subtick_alloc =
+            anchors.create_subtick_move != 0 && anchors.add_element_to_rep != 0;
+
+        if (state.bhop_jumped_cmd == cmd->command_number) {
+            bhop_do_jump = true;
+        } else if (next_jump_frac < 1.0f && jump_held) {
+            const bool modern_landed =
+                last_landed_tick >= 0 && last_landed_frac >= 0.0f && last_landed_frac < 1.0f;
+            const bool landing_this_tick = on_ground || modern_landed || (predicted_land_frac >= 0.0f);
+            if (landing_this_tick) {
+                // With CS2 subtick PressJump (rel=false, prs=true), every grounded/landing tick
+                // gets an exact fresh 0->1 edge with zero 1-tick ground-stick release delay.
+                if (has_subtick_alloc) {
+                    bhop_do_jump = true;
+                    state.bhop.last_cmd = cmd->command_number;
+                    state.bhop.was_on_ground = true;
+                    state.bhop.cmd_jump = true;
+                    state.bhop.release_next = false;
+                } else {
+                    bhop_do_jump = step_bhop(state.bhop, cmd->command_number, true, true);
+                }
+                if (bhop_do_jump) {
+                    float land_w = 0.0f;
+                    if (!on_ground) {
+                        if (modern_landed) land_w = last_landed_frac;
+                        else if (predicted_land_frac >= 0.0f) land_w = predicted_land_frac;
+                    }
+                    state.bhop_jumped_cmd = cmd->command_number;
+                    state.bhop_jumped_when =
+                        std::clamp(std::max(land_w, next_jump_frac), 0.0f, 62.0f / 64.0f);
+                }
+            } else {
+                bhop_do_jump = step_bhop(state.bhop, cmd->command_number, false, true);
+            }
         } else {
-            // Spam-penalty cooldown active this tick: notify state we did not jump on this tick.
             (void)step_bhop(state.bhop, cmd->command_number, false, jump_held);
             bhop_do_jump = false;
         }
+
         if (jump_held) {
             strip_subtick_buttons(base_cmd, sdk::k_in_jump);
             if (bhop_do_jump && state.bhop_jumped_cmd == cmd->command_number) {
-                // Reverie PressJump subtick edge pair so CS2's ProcessMovement triggers jump cleanly
-                // at exact landing/cooldown fraction without hitting sv_jump_spam_penalty_time.
-                if (auto* rel = sdk::add_subtick_move_step(anchors, cmd, state.bhop_jumped_when)) {
+                auto* rel = sdk::add_subtick_move_step(anchors, cmd, state.bhop_jumped_when);
+                auto* prs = rel ? sdk::add_subtick_move_step(anchors, cmd, state.bhop_jumped_when)
+                                : nullptr;
+                if (rel && prs) {
                     rel->set_button(sdk::k_in_jump);
                     rel->set_pressed(false);
-                }
-                if (auto* prs = sdk::add_subtick_move_step(anchors, cmd, state.bhop_jumped_when)) {
                     prs->set_button(sdk::k_in_jump);
                     prs->set_pressed(true);
+                    // Avoid toggle|=IN_JUMP at t=0 (which triggers sv_jump_spam_penalty_time on mid-tick
+                    // landings). Keep held=0 for mid-tick landing, held=1 for t=0 grounded jump.
+                    cmd->button_state.set_button_state(
+                        sdk::k_in_jump,
+                        state.bhop_jumped_when > 0.0f ? sdk::in_button_state::up
+                                                      : sdk::in_button_state::down);
+                } else {
+                    cmd->button_state.set_button_state(sdk::k_in_jump, sdk::in_button_state::up_down);
                 }
-                cmd->button_state.set_button_state(sdk::k_in_jump, sdk::in_button_state::up_down);
             } else {
                 cmd->button_state.set_button_state(sdk::k_in_jump, sdk::in_button_state::up);
             }

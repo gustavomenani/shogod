@@ -218,43 +218,60 @@ void draw_keybinds(ImDrawList* dl, const config::config_v1& cfg, const ui::statu
     const auto active = [&](bound_feature feature, bool enabled) {
         return live.binds_sampled ? (live.active_binds & config::feature_bit(feature)) != 0 : enabled;
     };
-    struct entry {
-        const char* name;
-        bool active;
+    struct row_display {
+        std::string name;
+        std::string val;
     };
-    const entry items[] = {
-        {"Ragebot", active(bound_feature::rage, cfg.rage.enabled)},
-        {"Anti-Aim", active(bound_feature::anti_aim, cfg.anti_aim.enabled) && !cfg.misc.block_server_detected},
-        {"Player ESP", active(bound_feature::esp, cfg.visuals.enabled)},
-        {"Third person", live.third_person_available && active(bound_feature::third_person, cfg.visuals.third_person)},
-        {"Pose history", cfg.visuals.backtrack_ghost && cfg.rage.backtrack},
-        {"Bunny hop", active(bound_feature::bhop, cfg.misc.movement.bhop)},
-        {"Auto strafe", active(bound_feature::auto_strafe, cfg.misc.movement.auto_strafe) && !cfg.misc.block_server_detected},
-        {"Peek assist", active(bound_feature::peek_assist, cfg.misc.movement.peek_assist)},
-        {"Auto pistol", cfg.misc.utilities.auto_pistol && !cfg.misc.block_server_detected},
-        {"Safe mode", cfg.misc.block_server_detected},
-    };
-    int active_count = 0;
-    for (const auto& it : items) {
-        if (it.active) ++active_count;
+    std::vector<row_display> rows;
+    rows.reserve(16);
+
+    // 1. Show all active universal Neverlose keybinds (with exact override values!)
+    for (const auto& kb : live.active_keybinds) {
+        rows.push_back({kb.label, "[" + kb.value + "]"});
     }
-    if (active_count == 0) return;
+
+    // 2. Also include legacy bound features if not already shown by a universal bind.
+    auto add_legacy = [&](const char* name, bool on) {
+        if (!on) return;
+        for (const auto& r : rows) {
+            if (r.name == name) return;
+        }
+        rows.push_back({name, "[on]"});
+    };
+    add_legacy("Ragebot", active(bound_feature::rage, cfg.rage.enabled));
+    add_legacy("Anti-Aim", active(bound_feature::anti_aim, cfg.anti_aim.enabled) && !cfg.misc.block_server_detected);
+    add_legacy("Player ESP", active(bound_feature::esp, cfg.visuals.enabled));
+    add_legacy("Third person", live.third_person_available && active(bound_feature::third_person, cfg.visuals.third_person));
+    add_legacy("Bunny hop", active(bound_feature::bhop, cfg.misc.movement.bhop));
+    add_legacy("Auto strafe", active(bound_feature::auto_strafe, cfg.misc.movement.auto_strafe) && !cfg.misc.block_server_detected);
+    add_legacy("Peek assist", active(bound_feature::peek_assist, cfg.misc.movement.peek_assist));
+    add_legacy("Auto pistol", cfg.misc.utilities.auto_pistol && !cfg.misc.block_server_detected);
+    add_legacy("Safe mode", cfg.misc.block_server_detected);
+
+    if (rows.empty()) return;
+
+    float max_w = 172.0f;
+    for (const auto& r : rows) {
+        const float w_need = ImGui::CalcTextSize(r.name.c_str()).x +
+                             ImGui::CalcTextSize(r.val.c_str()).x + 30.0f;
+        max_w = std::max(max_w, w_need);
+    }
 
     const float x = 14.0f;
     float y = std::max(260.0f, min_y);
-    const float w = 160.0f;
-    const float h = 22.0f + active_count * 18.0f + 6.0f;
+    const float w = std::min(260.0f, max_w);
     const float row_h = 18.0f;
+    const float h = 24.0f + static_cast<float>(rows.size()) * row_h + 6.0f;
     const auto& pal = ui::colors();
-    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(14, 17, 24, 240), 5.0f);
-    dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h), pal.border, 5.0f);
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(10, 14, 24, 236), 6.0f);
+    dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h), pal.border, 6.0f);
     dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + 2.0f), pal.accent, 2.0f);
-    dl->AddText(ImVec2(x + 8.0f, y + 5.0f), IM_COL32(238, 242, 248, 240), "Keybinds");
+    dl->AddText(ImVec2(x + 9.0f, y + 5.0f), IM_COL32(238, 242, 248, 242), "Keybinds");
     y += 24.0f;
-    for (const auto& it : items) {
-        if (!it.active) continue;
-        dl->AddText(ImVec2(x + 8.0f, y), IM_COL32(200, 206, 218, 230), it.name);
-        dl->AddText(ImVec2(x + w - 28.0f, y), pal.accent, "[on]");
+    for (const auto& r : rows) {
+        const float vw = ImGui::CalcTextSize(r.val.c_str()).x;
+        dl->AddText(ImVec2(x + 9.0f, y), IM_COL32(204, 210, 224, 235), r.name.c_str());
+        dl->AddText(ImVec2(x + w - vw - 9.0f, y), pal.accent, r.val.c_str());
         y += row_h;
     }
 }

@@ -1,6 +1,7 @@
 #include "engine/hooks.hpp"
 
 #include "config/bind_state.hpp"
+#include "config/keybinds.hpp"
 
 #include "engine/log.hpp"
 #include "engine/module.hpp"
@@ -800,8 +801,17 @@ HRESULT WINAPI hk_present(IDXGISwapChain* swapchain, UINT sync, UINT flags) {
         if (g_render.begin(g_rtv, g_rtv_w, g_rtv_h)) {
             const auto snap = runtime::snapshot_publisher().acquire();
             const ImVec2 display = ImGui::GetIO().DisplaySize;
-            const auto& cfg = runtime::cfg().get();
+            const auto& raw_cfg = runtime::cfg().get();
             const bool accepts_input = !menu.open && game_has_focus(g_hwnd);
+            static config::keybind_runtime g_keybind_runtime;
+            config::config_v1 cfg = raw_cfg;
+            const int menu_key = raw_cfg.ui.menu_key > 0 ? raw_cfg.ui.menu_key : VK_INSERT;
+            g_keybind_runtime.poll(
+                raw_cfg.keybinds,
+                [](int vk) noexcept { return (GetAsyncKeyState(vk) & 0x8000) != 0; },
+                accepts_input, menu_key);
+            g_keybind_runtime.apply_overrides(cfg, raw_cfg.keybinds,
+                                              &runtime::live().active_keybinds);
             const auto active = sample_feature_binds(cfg, accepts_input);
             {
                 std::lock_guard guard(g_settings_mutex);

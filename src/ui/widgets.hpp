@@ -12,16 +12,26 @@
 
 namespace shogod::ui::widgets {
 
+void set_active_bind_store(config::config_v1* cfg) noexcept;
+void open_keybind_popup(const char* bind_id);
+void render_keybind_popup();
+
 void section(const char* title);
 void tip(const char* text);              // call right after the item
-bool toggle(const char* label, bool* value, const char* tooltip = nullptr);
-bool slider_float(const char* label, float* value, float lo, float hi, const char* tooltip = nullptr);
-bool slider_float_step(const char* label, float* value, float lo, float hi, const char* tooltip = nullptr);
-bool slider_min_damage(const char* label, float* value, const char* tooltip = nullptr);
-bool slider_int(const char* label, int* value, int lo, int hi, const char* tooltip = nullptr);
+bool toggle(const char* label, bool* value, const char* tooltip = nullptr,
+            const char* bind_id = nullptr);
+bool slider_float(const char* label, float* value, float lo, float hi,
+                  const char* tooltip = nullptr, const char* bind_id = nullptr);
+bool slider_float_step(const char* label, float* value, float lo, float hi,
+                       const char* tooltip = nullptr, const char* bind_id = nullptr);
+bool slider_min_damage(const char* label, float* value, const char* tooltip = nullptr,
+                       const char* bind_id = nullptr);
+bool slider_int(const char* label, int* value, int lo, int hi, const char* tooltip = nullptr,
+                const char* bind_id = nullptr);
 using combo_icon = void (*)(ImDrawList&, ImVec2, int, ImU32);
 bool combo(const char* label, int* value, const char* const* items, int count,
-           const char* tooltip = nullptr, combo_icon draw_icon = nullptr);
+           const char* tooltip = nullptr, combo_icon draw_icon = nullptr,
+           const char* bind_id = nullptr);
 struct list_option {
     const char* name;
     bool* value;

@@ -571,6 +571,37 @@ struct subtick_strafe_input {
     return std::max(0.0f, (std::floor(frac * 64.0f) + 1.0f) / 64.0f);
 }
 
+// Predicts the exact subtick fraction in [0, 1) when a descending player hits ground
+// during the current 1/64s tick, solving 0.5*g*t^2 + (-vel_z)*t = dist_to_ground.
+// Returns -1.0f if ground contact will not occur within this tick.
+[[nodiscard]] inline float predict_landing_subtick_frac(
+    float dist_to_ground, float vel_z, float gravity) noexcept {
+    if (!std::isfinite(dist_to_ground) || !std::isfinite(vel_z) || !std::isfinite(gravity)) {
+        return -1.0f;
+    }
+    if (dist_to_ground < 0.0f || vel_z >= -0.5f) return -1.0f;
+    if (dist_to_ground <= 0.05f) return 0.0f;
+
+    constexpr float k_tick_dt = 1.0f / 64.0f;
+    const float g = std::max(0.0f, gravity);
+    const float v0 = -vel_z;  // positive downward speed
+    const float max_fall = v0 * k_tick_dt + 0.5f * g * k_tick_dt * k_tick_dt;
+    if (dist_to_ground > max_fall) return -1.0f;
+
+    float t = 0.0f;
+    if (g > 1.0f) {
+        const float disc = v0 * v0 + 2.0f * g * dist_to_ground;
+        t = (-v0 + std::sqrt(std::max(0.0f, disc))) / g;
+    } else {
+        t = dist_to_ground / std::max(0.5f, v0);
+    }
+    const float raw_frac = t / k_tick_dt;
+    if (!std::isfinite(raw_frac) || raw_frac < 0.0f || raw_frac >= 1.0f) return -1.0f;
+    // Quantize up to CS2's 64-slice subtick grid so PressJump fires right after contact.
+    const float q = std::ceil(raw_frac * 64.0f) / 64.0f;
+    return (q < 1.0f) ? std::clamp(q, 0.0f, 62.0f / 64.0f) : -1.0f;
+}
+
 // Reverie-adapted subtick AirStrafer with three key stability fixes:
 // 1. Holds one consistent strafe side across all subticks in a command (no intra-tick zigzag).
 // 2. Keeps move_ref_yaw (base_cmd->viewangles->y) rock-solid with zero camera/third-person jitter.

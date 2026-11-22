@@ -347,10 +347,12 @@ void rage(config::store& cfg, const status& /*live*/) {
     ImGui::TableNextColumn();
     section("General");
     if (begin_card("##target", ImVec2(0, 0))) {
-        toggle("Enabled", &c.rage.enabled, "Master switch for the ragebot");
+        toggle("Enabled", &c.rage.enabled, "Master switch for the ragebot", "rage.enabled");
         combo("Target priority", reinterpret_cast<int*>(&c.rage.priority), k_priorities, 4);
-        toggle("Silent aim", &c.rage.silent_aim, "Aims inside CUserCommand without moving local camera");
-        toggle("Auto revolver", &c.rage.auto_revolver, "Pre-cocks the R8 Revolver");
+        toggle("Silent aim", &c.rage.silent_aim,
+               "Aims inside CUserCommand without moving local camera", "rage.silent_aim");
+        toggle("Auto revolver", &c.rage.auto_revolver, "Pre-cocks the R8 Revolver",
+               "rage.auto_revolver");
     }
     end_card();
 
@@ -361,7 +363,8 @@ void rage(config::store& cfg, const status& /*live*/) {
             {"Auto scope", &w.auto_scope},
             {"Auto crouch", &w.auto_crouch},
         });
-        toggle("Auto Stop", &w.auto_stop, "Counter-strafes automatically until shot accuracy is reached");
+        toggle("Auto Stop", &w.auto_stop,
+               "Counter-strafes automatically until shot accuracy is reached", "rage.auto_stop");
         if (w.auto_stop) {
             constexpr const char* stop_names[] = {"Early", "In air", "Between shots"};
             constexpr std::uint32_t stop_masks[] = {
@@ -387,10 +390,13 @@ void rage(config::store& cfg, const status& /*live*/) {
                        "Consecutive stable ticks required before pulling the trigger");
         }
         toggle("Prefer body aim", &w.prefer_body_aim,
-               "Takes clean body shots when enemy heads are hidden or pitch-down");
-        toggle("Force body aim", &w.force_body_aim, "Excludes head hitbox on this weapon");
+               "Takes clean body shots when enemy heads are hidden or pitch-down",
+               "rage.prefer_body_aim");
+        toggle("Force body aim", &w.force_body_aim, "Excludes head hitbox on this weapon",
+               "rage.force_body_aim");
         toggle("Wallbang", &w.penetration,
-               "Use simulated damage after penetration for the Min damage threshold");
+               "Use simulated damage after penetration for the Min damage threshold",
+               "rage.penetration");
     }
     end_card();
 
@@ -398,28 +404,32 @@ void rage(config::store& cfg, const status& /*live*/) {
     section("Aimbot");
     if (begin_card("##aim", ImVec2(0, 0))) {
         slider_float_step("Field of view", &w.fov, 0.0f, 180.0f,
-                          "Maximum angular distance to a target");
+                          "Maximum angular distance to a target", "rage.fov");
         slider_min_damage("Min damage", &w.min_damage,
-                          "1-100 flat damage, 101-120 scales as HP+1..HP+20");
+                          "1-100 flat damage, 101-120 scales as HP+1..HP+20 (Right-click for Min-DMG Override)",
+                          "rage.min_damage");
         slider_float_step("Hitchance", &w.hitchance, 0.0f, 100.0f,
-                          "Probability required before firing");
+                          "Probability required before firing", "rage.hitchance");
         separator_y();
         multi_bits("Hitboxes", &w.aim_points, k_point_names, k_point_masks, 6);
         slider_float_step("Multi-point", &w.multipoint, 0.0f, 100.0f,
-                          "Hitbox edge spread scale; 0 aims center, higher peeks tight corners");
+                          "Hitbox edge spread scale; 0 aims center, higher peeks tight corners",
+                          "rage.multipoint");
     }
     end_card();
 
     section("Prediction");
     if (begin_card("##prediction", ImVec2(0, 0))) {
         toggle("Lag compensation", &c.rage.backtrack,
-               "Record historical poses for backtracking and ESP ghost");
+               "Record historical poses for backtracking and ESP ghost", "rage.backtrack");
         if (c.rage.backtrack) {
             slider_float_step("Window (ms)", &c.rage.backtrack_ms, 0.0f, 200.0f,
-                              "Lower window reduces CPU cost when scanning lag records");
+                              "Lower window reduces CPU cost when scanning lag records",
+                              "rage.backtrack_ms");
         }
         slider_float_step("Extrapolation (ms)", &c.rage.extrapolation_ms, 0.0f, 50.0f,
-                          "Projects hitboxes along wall-clamped enemy velocity (0 = off)");
+                          "Projects hitboxes along wall-clamped enemy velocity (0 = off)",
+                          "rage.extrapolation_ms");
     }
     end_card();
 

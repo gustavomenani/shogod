@@ -6,13 +6,24 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "config/config.hpp"
+#include "config/keybinds.hpp"
 #include "imgui.h"
 
 namespace shogod::ui {
 
-enum class tab : int { rage = 0, antiaim, visuals, misc, configs, settings, count };
+enum class tab : int {
+    rage = 0,
+    antiaim,
+    players,
+    world,
+    misc,
+    configs,
+    keybinds,
+    count
+};
 inline constexpr int k_tab_count = static_cast<int>(tab::count);
 
 struct status {
@@ -24,6 +35,7 @@ struct status {
     bool in_game = false;
     std::uint32_t active_binds = 0;
     bool binds_sampled = false;
+    std::vector<config::active_bind_display> active_keybinds{};
     bool no_flash_available = false;
     bool no_smoke_available = false;
     bool no_scope_available = false;
@@ -39,6 +51,7 @@ struct menu_state {
     float open_anim = 0.0f;
     float nav_y = -1.0f;
     std::array<float, k_tab_count> tab_anim{};
+    char search_query[64]{};
     std::string toast;
     float toast_time = 0.0f;
 

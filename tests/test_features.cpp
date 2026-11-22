@@ -5,6 +5,7 @@
 #include <limits>
 
 #include "config/bind_state.hpp"
+#include "config/keybinds.hpp"
 
 #include "features/aaa/antiaim.hpp"
 #include "features/audio/hitsounds.hpp"
@@ -2505,4 +2506,92 @@ TEST(esp_layout, stacks_bars_and_flags_and_moves_via_ghost) {
         }
     }
     EXPECT_TRUE(found_dragged);
+}
+
+TEST(bhop, predict_landing_subtick_frac_quantizes_and_guards) {
+    // Ascending or zero vertical velocity never triggers a landing prediction.
+    EXPECT_LT(features::predict_landing_subtick_frac(1.0f, 120.0f, 800.0f), 0.0f);
+    EXPECT_LT(features::predict_landing_subtick_frac(1.0f, 0.0f, 800.0f), 0.0f);
+
+    // Too high to touch ground within one 64-tick interval (15.625 ms) returns -1.
+    // At vel_z = -200 u/s, g = 800 u/s^2: max drop in 1/64 s is 200/64 + 0.5*800/4096 = 3.22 u.
+    EXPECT_LT(features::predict_landing_subtick_frac(5.0f, -200.0f, 800.0f), 0.0f);
+
+    // Mid-tick descent lands roughly halfway through the tick and quantizes onto 1/64 grid.
+    const float mid = features::predict_landing_subtick_frac(1.6f, -200.0f, 800.0f);
+    EXPECT_GT(mid, 0.35f);
+    EXPECT_LT(mid, 0.70f);
+    const float scaled = mid * 64.0f;
+    EXPECT_NEAR(scaled, std::round(scaled), 1e-4f);
+
+    // Essentially touching the floor (<= 0.12 u) returns 0.0f immediately.
+    EXPECT_FLOAT_EQ(features::predict_landing_subtick_frac(0.05f, -150.0f, 800.0f), 0.0f);
+
+    // Non-finite or negative inputs return -1 safely.
+    const float qnan = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_LT(features::predict_landing_subtick_frac(qnan, -200.0f, 800.0f), 0.0f);
+    EXPECT_LT(features::predict_landing_subtick_frac(-1.0f, -200.0f, 800.0f), 0.0f);
+}
+
+TEST(binds, universal_keybind_runtime_toggle_hold_always_and_overrides) {
+    std::vector<config::menu_keybind> binds;
+    binds.push_back({"rage.min_damage", 0x56, config::bind_mode::hold, true, 105.0f});    // 'V' -> HP+5
+    binds.push_back({"aa.yaw_offset", 0x5A, config::bind_mode::toggle, true, -90.0f});    // 'Z' -> -90
+    binds.push_back({"rage.force_body_aim", 0, config::bind_mode::always, true, 1.0f});   // Always ON
+    binds.push_back({"vis.third_person", 0x2D, config::bind_mode::toggle, true, 1.0f});   // Menu key Insert -> blocked
+
+    bool key_v = false;
+    bool key_z = false;
+    bool key_ins = false;
+    auto reader = [&](int vk) noexcept {
+        if (vk == 0x56) return key_v;
+        if (vk == 0x5A) return key_z;
+        if (vk == 0x2D) return key_ins;
+        return false;
+    };
+
+    config::keybind_runtime rt;
+    // Frame 1: arm keys while released; Always bind is immediately active.
+    rt.poll(binds, reader, true, 0x2D);
+    EXPECT_FALSE(rt.is_active(0));
+    EXPECT_FALSE(rt.is_active(1));
+    EXPECT_TRUE(rt.is_active(2));
+    EXPECT_FALSE(rt.is_active(3));
+
+    // Frame 2: press V (Hold), Z (Toggle), and Insert (blocked menu key).
+    key_v = true;
+    key_z = true;
+    key_ins = true;
+    rt.poll(binds, reader, true, 0x2D);
+    EXPECT_TRUE(rt.is_active(0));
+    EXPECT_TRUE(rt.is_active(1));
+    EXPECT_TRUE(rt.is_active(2));
+    EXPECT_FALSE(rt.is_active(3));
+
+    // Apply overrides onto a working config (including a custom weapon override).
+    config::config_v1 cfg{};
+    cfg.rage.weapon_overrides[7] = cfg.rage.weapons[static_cast<std::size_t>(config::weapon_group::rifle)];
+    std::vector<config::active_bind_display> hud;
+    rt.apply_overrides(cfg, binds, &hud);
+
+    EXPECT_FLOAT_EQ(cfg.rage.weapons[0].min_damage, 105.0f);
+    EXPECT_FLOAT_EQ(cfg.rage.weapon_overrides[7].min_damage, 105.0f);
+    EXPECT_TRUE(cfg.rage.weapons[0].force_body_aim);
+    EXPECT_TRUE(cfg.rage.weapon_overrides[7].force_body_aim);
+    EXPECT_FLOAT_EQ(cfg.anti_aim.yaw_offset, -90.0f);
+    EXPECT_FALSE(cfg.visuals.third_person);
+
+    ASSERT_EQ(hud.size(), 3u);
+    EXPECT_EQ(hud[0].label, "Min damage");
+    EXPECT_EQ(hud[0].value, "HP+5");
+    EXPECT_EQ(hud[1].label, "Yaw offset");
+    EXPECT_EQ(hud[1].value, "-90");
+    EXPECT_EQ(hud[2].label, "Force body aim");
+    EXPECT_EQ(hud[2].value, "on");
+
+    // Focus loss disarms Hold ('V') immediately while keeping Toggle ('Z') and Always active.
+    rt.poll(binds, reader, false, 0x2D);
+    EXPECT_FALSE(rt.is_active(0));
+    EXPECT_TRUE(rt.is_active(1));
+    EXPECT_TRUE(rt.is_active(2));
 }

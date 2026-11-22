@@ -453,3 +453,45 @@ TEST(config, esp_layout_hitsounds_hitmarker_and_spectator_list_roundtrip_and_cla
     EXPECT_EQ(clamped.get().misc.hitsound.body_hit, 18);
     EXPECT_EQ(clamped.get().misc.hitsound.head_kill, 0);
 }
+
+TEST(config, universal_keybinds_json_roundtrip_unknown_filter_and_clamp) {
+    store s;
+    s.get().keybinds.push_back({"rage.min_damage", 0x56, bind_mode::hold, true, 10.0f});
+    s.get().keybinds.push_back({"aa.yaw_offset", 0x5A, bind_mode::toggle, true, -90.0f});
+    s.get().keybinds.push_back({"vis.third_person", 0x43, bind_mode::always, false, 1.0f});
+
+    store reloaded;
+    ASSERT_TRUE(reloaded.from_json(s.to_json()));
+    EXPECT_EQ(reloaded.clamps_applied(), 0);
+    ASSERT_EQ(reloaded.get().keybinds.size(), 3u);
+    EXPECT_EQ(reloaded.get().keybinds[0].target, "rage.min_damage");
+    EXPECT_EQ(reloaded.get().keybinds[0].vk, 0x56);
+    EXPECT_EQ(reloaded.get().keybinds[0].mode, bind_mode::hold);
+    EXPECT_TRUE(reloaded.get().keybinds[0].show_in_binds);
+    EXPECT_FLOAT_EQ(reloaded.get().keybinds[0].override_value, 10.0f);
+
+    EXPECT_EQ(reloaded.get().keybinds[1].target, "aa.yaw_offset");
+    EXPECT_FLOAT_EQ(reloaded.get().keybinds[1].override_value, -90.0f);
+    EXPECT_EQ(reloaded.get().keybinds[2].mode, bind_mode::always);
+    EXPECT_FALSE(reloaded.get().keybinds[2].show_in_binds);
+
+    // Unknown targets are dropped; out-of-range vk resets to 0, mode and override_value clamp.
+    store clamped;
+    ASSERT_TRUE(clamped.from_json(R"({
+        "version": 1,
+        "keybinds": [
+            {"target": "nonexistent.setting", "vk": 65, "mode": 0, "show_in_binds": true, "override_value": 1.0},
+            {"target": "rage.min_damage", "vk": 999, "mode": 9, "show_in_binds": true, "override_value": 500.0},
+            {"target": "aa.yaw_offset", "vk": -4, "mode": -1, "show_in_binds": false, "override_value": -999.0}
+        ]
+    })"));
+    ASSERT_EQ(clamped.get().keybinds.size(), 2u);
+    EXPECT_GT(clamped.clamps_applied(), 0);
+    EXPECT_EQ(clamped.get().keybinds[0].target, "rage.min_damage");
+    EXPECT_EQ(clamped.get().keybinds[0].vk, 0);
+    EXPECT_EQ(clamped.get().keybinds[0].mode, bind_mode::always);
+    EXPECT_FLOAT_EQ(clamped.get().keybinds[0].override_value, 120.0f);
+    EXPECT_EQ(clamped.get().keybinds[1].vk, 0);
+    EXPECT_EQ(clamped.get().keybinds[1].mode, bind_mode::toggle);
+    EXPECT_FLOAT_EQ(clamped.get().keybinds[1].override_value, -180.0f);
+}

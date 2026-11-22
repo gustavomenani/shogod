@@ -49,15 +49,24 @@ void configs(config::store& cfg, menu_state& state) {
 
         const auto path = config::store::default_dir() / (std::string(g_name) + ".json");
         const float gap = 8.0f;
-        const float two_w = std::floor((inner_w - gap) * 0.5f);
-        if (action_button("Save", ImVec2(two_w, 0))) {
+        const float act_w = std::floor((inner_w - gap * 2.0f) / 3.0f);
+        if (action_button("Save", ImVec2(act_w, 0))) {
             if (cfg.save(path)) state.notify("saved " + std::string(g_name) + ".json");
             else state.notify("save failed");
         }
         ImGui::SameLine(0.0f, gap);
-        if (action_button("Load", ImVec2(two_w, 0))) {
+        if (action_button("Load", ImVec2(act_w, 0))) {
             if (cfg.load(path)) state.notify("loaded " + std::string(g_name) + ".json");
             else state.notify("could not load " + std::string(g_name) + ".json");
+        }
+        ImGui::SameLine(0.0f, gap);
+        if (action_button("Delete", ImVec2(act_w, 0))) {
+            std::error_code ec;
+            if (std::filesystem::remove(path, ec) && !ec) {
+                state.notify("deleted " + std::string(g_name) + ".json");
+            } else {
+                state.notify("could not delete " + std::string(g_name) + ".json");
+            }
         }
 
         separator_y();
